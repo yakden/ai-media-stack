@@ -165,6 +165,73 @@ def _queue_of(jid):
 
 
 # --------------------------------------------------------------------------- #
+# Live activity tracking — what every key is doing RIGHT NOW (in-flight) so the #
+# admin panel shows real-time work (translations/LLM/voice never hit the broker #
+# queue, so we track them here at the gateway).                                 #
+# --------------------------------------------------------------------------- #
+import itertools as _it
+
+_INFLIGHT = {}                 # rid -> {owner, service, path, started}
+_inflight_seq = _it.count(1)
+_inflight_lock = threading.Lock()
+# light owner cache so the per-request middleware doesn't hammer keys.json
+_OWNER_CACHE = {"ts": 0.0, "map": {}}
+
+
+def _service_label(path):
+    if path.startswith("/v1/translate") or path == "/v1/detect":
+        return "translate"
+    if path.startswith("/v1/llm"):
+        return "llm"
+    if path.startswith("/v1/3d/render"):
+        return "render"
+    if path.startswith("/v1/3d"):
+        return "3d-проект"
+    if path.startswith("/v1/voice"):
+        return "голос"
+    if path.startswith("/v1/avatar"):
+        return "аватар"
+    if path.startswith("/v1/dub"):
+        return "дубляж"
+    return path.replace("/v1/", "")
+
+
+def _owner_for(req):
+    key = req.headers.get("x-api-key")
+    if not key:
+        a = req.headers.get("authorization", "")
+        if a.lower().startswith("bearer "):
+            key = a[7:].strip()
+    if not key:
+        return "—"
+    now = time.time()
+    if now - _OWNER_CACHE["ts"] > 3:          # refresh map every few seconds
+        _OWNER_CACHE["map"] = {k: v.get("owner", "") for k, v in _load(KEYS_F, {}).items()}
+        _OWNER_CACHE["ts"] = now
+    return _OWNER_CACHE["map"].get(key) or "неизв. ключ"
+
+
+_NO_TRACK = {"/v1/ping", "/v1/models", "/v1/voices", "/v1/usage", "/v1/billing"}
+
+
+@app.middleware("http")
+async def _track_inflight(request, call_next):
+    path = request.url.path
+    rid = None
+    if path.startswith("/v1/") and path not in _NO_TRACK and request.method in ("POST", "PUT"):
+        rid = next(_inflight_seq)
+        with _inflight_lock:
+            _INFLIGHT[rid] = {"owner": _owner_for(request), "service": _service_label(path),
+                              "path": path, "started": time.time()}
+    try:
+        return await call_next(request)
+    finally:
+        if rid is not None:
+            with _inflight_lock:
+                _INFLIGHT.pop(rid, None)
+
+
+# --------------------------------------------------------------------------- #
 # Public API (API-key auth)                                                   #
 # --------------------------------------------------------------------------- #
 @app.get("/v1/ping")
@@ -690,6 +757,47 @@ def broker_state(authorization: str = Header(None), x_admin_key: str = Header(No
         raise HTTPException(502, f"broker error: {exc}")
 
 
+@app.get("/admin/activity")
+def admin_activity(authorization: str = Header(None), x_admin_key: str = Header(None)):
+    """Unified LIVE view for the dashboard:
+      gpu/model/swapping, broker running+queued GPU jobs, in-flight gateway requests
+      (translations/LLM/voice happening right now, with owner), and a recent-completed feed."""
+    _admin(authorization, x_admin_key)
+    out = {"now": int(time.time())}
+    try:
+        st = httpx.get(f"{BROKER}/api/state", timeout=8).json()
+    except Exception:
+        st = {}
+    out["gpu"] = st.get("gpu", {})
+    out["model"] = st.get("model")
+    out["swapping"] = st.get("swapping")
+    jobs = st.get("jobs", [])
+    out["running"] = [j for j in jobs if j.get("status") == "running"]
+    out["queued"] = sorted((j for j in jobs if j.get("status") == "queued"),
+                           key=lambda j: j.get("position") or 0)
+    now = time.time()
+    with _inflight_lock:
+        out["inflight"] = sorted(
+            ({"owner": v["owner"], "service": v["service"], "elapsed": round(now - v["started"], 1)}
+             for v in _INFLIGHT.values()), key=lambda x: -x["elapsed"])
+    recent = []
+    try:
+        with open(EVENTS_F) as f:
+            lines = f.readlines()[-60:]
+        for ln in reversed(lines):
+            try:
+                e = json.loads(ln)
+                recent.append({"ts": e["ts"], "owner": e.get("owner") or "—",
+                               "service": e["service"], "units": e.get("units", 0),
+                               "tokens": e.get("tokens", 0)})
+            except Exception:
+                pass
+    except Exception:
+        pass
+    out["recent"] = recent
+    return out
+
+
 @app.get("/admin/usage")
 def all_usage(authorization: str = Header(None), x_admin_key: str = Header(None)):
     _admin(authorization, x_admin_key)
@@ -742,6 +850,12 @@ button.d{background:#2a1a1d;border-color:#5a2a32;color:#ff9a9a}button.ghost{back
 #toast{position:fixed;left:50%;bottom:22px;transform:translateX(-50%) translateY(80px);background:#1c232d;border:1px solid var(--line);padding:11px 18px;border-radius:12px;opacity:0;transition:.25s;z-index:9;max-width:90vw}
 #toast.show{opacity:1;transform:translateX(-50%) translateY(0)}
 .keyout{background:#0b1a10;border:1px solid #2a5a3a;border-radius:11px;padding:10px;margin-top:8px;display:none}
+.rrow{display:flex;align-items:center;gap:8px;padding:7px 4px;border-bottom:1px solid var(--line);font-size:13px}
+.rrow:last-child{border:0}
+.rico{width:20px;text-align:center;flex:none}
+.rown{font-weight:600;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;max-width:38%}
+.rmeta{color:var(--mut);font-size:12px;margin-left:auto;white-space:nowrap}
+.rago{color:var(--mut);font-size:11px;width:42px;text-align:right;flex:none}
 a{color:var(--acc)}
 </style></head><body>
 <div class=hd><h1>🛠️ API-шлюз · Админ</h1><span id=conn class=badge><span class=dot></span>не подключено</span></div>
@@ -758,11 +872,18 @@ a{color:var(--acc)}
 </div>
 
 <div class=card>
-  <div class=hd><h3>⚡ Загрузка</h3><span id=clock class="mut sml"></span></div>
+  <div class=hd><h3>⚡ Живая загрузка</h3><span id=clock class="mut sml"></span></div>
   <div id=gpu class=row style=margin-top:10px></div>
-  <div id=now style=margin-top:10px></div>
-  <h3 style=margin-top:14px>📋 Очередь <span id=qn class="mut sml"></span></h3>
+  <canvas id=spark height=44 style="width:100%;margin-top:10px;display:block"></canvas>
+  <h3 style=margin-top:14px>▶️ Выполняется сейчас <span id=ln class="mut sml"></span></h3>
+  <div id=live style=margin-top:6px></div>
+  <h3 style=margin-top:14px>📋 В очереди <span id=qn class="mut sml"></span></h3>
   <div id=queue style=margin-top:6px></div>
+</div>
+
+<div class=card>
+  <div class=hd><h3>🕒 Последние операции</h3><span class="mut sml">кто · что · сколько</span></div>
+  <div id=recent style=margin-top:8px></div>
 </div>
 
 <div class=card>
@@ -797,17 +918,36 @@ async function api(path,opts={}){opts.headers=Object.assign({'X-Admin-Key':ADM},
 function ago(ts){if(!ts)return '—';let d=Math.floor(Date.now()/1000-ts);if(d<60)return d+'с назад';if(d<3600)return Math.floor(d/60)+'м назад';return Math.floor(d/3600)+'ч назад';}
 function copy(t){navigator.clipboard.writeText(t).then(()=>toast('Скопировано'));}
 
-async function loadLoad(){try{const s=await (await api('/admin/broker-state')).json();setConn(true);
-  const g=s.gpu||{},pct=g.vram_total?Math.round(g.vram_used/g.vram_total*100):0;
-  $('#gpu').innerHTML='<span class=badge>🧠 '+esc(s.model||'—')+'</span><span class=badge>util '+(g.util||0)+'%</span>'+
-    '<div style=flex:1;min-width:160px><div class=mut style=font-size:11px>VRAM '+(g.vram_used||0)+' / '+(g.vram_total||0)+' MiB</div><div class=bar><i style=width:'+pct+'%></i></div></div>'+
-    (s.swapping?'<span class=badge style=color:var(--warn)>↻ '+esc(s.swapping)+'</span>':'');
-  const jobs=s.jobs||[],run=jobs.find(j=>j.status==='running');
-  if(run){const p=run.est?Math.min(100,Math.round(run.elapsed/run.est*100)):0;
-    $('#now').innerHTML='<div class=kcard><div class=hd><b><span class="dot on" style=display:inline-block;margin-right:6px></span>'+esc(run.type)+'</b><span class=mut>'+(run.elapsed||0)+'с / ~'+(run.est||0)+'с</span></div><div class=mut style=margin-top:4px>'+esc(run.step||'')+'</div><div class=bar><i style=width:'+p+'%></i></div></div>';}
-  else $('#now').innerHTML='<div class=mut>сейчас ничего не выполняется</div>';
-  const q=jobs.filter(j=>j.status==='queued');$('#qn').textContent=q.length?('· '+q.length+' в ожидании'):'';
-  $('#queue').innerHTML=q.length?q.map(j=>'<div class=kcard style=padding:9px_12px><div class=hd><span><span class=badge>#'+j.position+'</span> '+esc(j.type)+'</span><span class=mut>~'+j.eta+'с</span></div></div>').join(''):'<div class=mut>очередь пуста</div>';
+const SVC_ICON={translate:'🌐',llm:'🤖','3d-проект':'🏗️',render:'🎨','голос':'🎙️',voice_translate:'🎙️',voice_chunk:'🎙️','аватар':'🖼️',avatar:'🖼️','дубляж':'🎥',dub:'🎥',project_3d:'🏗️',reference:'🖼️',interior:'🏠',furnish:'🛋️'};
+function svcIco(s){return SVC_ICON[s]||'•';}
+let UTILH=[];let SVRDELTA=0;
+function agoS(ts){let d=Math.floor(Date.now()/1000+SVRDELTA-ts);if(d<0)d=0;if(d<60)return d+'с';if(d<3600)return Math.floor(d/60)+'м';if(d<86400)return Math.floor(d/3600)+'ч';return Math.floor(d/86400)+'д';}
+function drawSpark(){const c=$('#spark');if(!c)return;const w=c.clientWidth||300,h=44;c.width=w;c.height=h;const x=c.getContext('2d');x.clearRect(0,0,w,h);
+  if(UTILH.length<2)return;const n=UTILH.length,step=w/Math.max(59,n-1);
+  x.beginPath();x.moveTo(0,h-(UTILH[0]/100)*h);for(let i=1;i<n;i++)x.lineTo(i*step,h-(UTILH[i]/100*(h-3))-1);
+  x.lineTo((n-1)*step,h);x.lineTo(0,h);x.closePath();const g=x.createLinearGradient(0,0,0,h);g.addColorStop(0,'rgba(79,140,255,.35)');g.addColorStop(1,'rgba(79,140,255,.02)');x.fillStyle=g;x.fill();
+  x.beginPath();x.moveTo(0,h-(UTILH[0]/100*(h-3))-1);for(let i=1;i<n;i++)x.lineTo(i*step,h-(UTILH[i]/100*(h-3))-1);x.strokeStyle='#4f8cff';x.lineWidth=2;x.stroke();}
+
+async function loadLoad(){try{const s=await (await api('/admin/activity')).json();setConn(true);
+  if(s.now)SVRDELTA=s.now-Math.floor(Date.now()/1000);
+  const g=s.gpu||{},pct=g.vram_total?Math.round(g.vram_used/g.vram_total*100):0,util=g.util||0;
+  UTILH.push(util);if(UTILH.length>60)UTILH.shift();drawSpark();
+  $('#gpu').innerHTML='<span class=badge>🧠 '+esc(s.model||'—')+'</span><span class=badge>util '+util+'%</span>'+
+    '<div style=flex:1;min-width:160px><div class=mut style=font-size:11px>VRAM '+(g.vram_used||0)+' / '+(g.vram_total||0)+' MiB ('+pct+'%)</div><div class=bar><i style=width:'+pct+'%></i></div></div>'+
+    (s.swapping?'<span class=badge style=color:var(--warn)>↻ своп: '+esc(s.swapping)+'</span>':'');
+  // RUNNING: broker GPU jobs + in-flight gateway requests (translate/llm/voice)
+  const run=s.running||[],fly=s.inflight||[];let html='';
+  run.forEach(j=>{const p=j.est?Math.min(100,Math.round(j.elapsed/j.est*100)):0;
+    html+='<div class=kcard><div class=hd><b><span class="dot on" style=display:inline-block;margin-right:6px></span>'+svcIco(j.type)+' '+esc(j.type)+'</b><span class=mut>'+(j.elapsed||0)+'с / ~'+(j.est||0)+'с</span></div>'+(j.step?'<div class=mut style=margin-top:4px>'+esc(j.step)+'</div>':'')+'<div class=bar><i style=width:'+p+'%></i></div></div>';});
+  fly.forEach(f=>{html+='<div class=kcard><div class=hd><b><span class="dot on" style=display:inline-block;margin-right:6px></span>'+svcIco(f.service)+' '+esc(f.service)+'</b><span class=mut>'+f.elapsed+'с</span></div><div class=mut style=margin-top:4px>👤 '+esc(f.owner)+' · обрабатывается…</div></div>';});
+  $('#live').innerHTML=html||'<div class=mut>сейчас ничего не выполняется</div>';
+  $('#ln').textContent=(run.length+fly.length)?('· '+(run.length+fly.length)):'';
+  // QUEUE: broker queued jobs
+  const q=s.queued||[];$('#qn').textContent=q.length?('· '+q.length+' в ожидании'):'';
+  $('#queue').innerHTML=q.length?q.map(j=>'<div class=kcard style=padding:9px_12px><div class=hd><span><span class=badge>#'+j.position+'</span> '+svcIco(j.type)+' '+esc(j.type)+'</span><span class=mut>~'+(j.eta||0)+'с</span></div></div>').join(''):'<div class=mut>очередь пуста</div>';
+  // RECENT completed feed
+  const r=s.recent||[];
+  $('#recent').innerHTML=r.length?r.slice(0,40).map(e=>'<div class=rrow><span class=rico>'+svcIco(e.service)+'</span><span class=rown>'+esc(e.owner)+'</span><span class=badge style=font-size:10px>'+esc(e.service)+'</span><span class=rmeta>'+e.units+' u'+(e.tokens?' · '+e.tokens+' tok':'')+'</span><span class=rago>'+agoS(e.ts)+'</span></div>').join(''):'<div class=mut>пока пусто</div>';
 }catch(e){}}
 
 async function loadKeys(){try{const d=await (await api('/admin/keys')).json();setConn(true);
