@@ -137,6 +137,26 @@ def _meter(key, service, units=None, tokens=0, job_id=None):
             pass
 
 
+def _tail_lines(path, n):
+    """Read only the last `n` non-empty lines of a file by seeking from the end —
+    O(n) regardless of total file size, so the live feed never loads a huge log."""
+    try:
+        with open(path, "rb") as f:
+            f.seek(0, os.SEEK_END)
+            pos = f.tell()
+            data = b""
+            block = 4096
+            while pos > 0 and data.count(b"\n") <= n:
+                step = min(block, pos)
+                pos -= step
+                f.seek(pos)
+                data = f.read(step) + data
+        lines = [ln for ln in data.split(b"\n") if ln.strip()]
+        return [ln.decode("utf-8", "replace") for ln in lines[-n:]]
+    except Exception:
+        return []
+
+
 def _admin(authorization, x_admin_key):
     tok = x_admin_key or (authorization[7:].strip() if authorization and authorization.lower().startswith("bearer ") else "")
     if not ADMIN_KEY or tok != ADMIN_KEY:
@@ -758,11 +778,14 @@ def broker_state(authorization: str = Header(None), x_admin_key: str = Header(No
 
 
 @app.get("/admin/activity")
-def admin_activity(authorization: str = Header(None), x_admin_key: str = Header(None)):
+def admin_activity(limit: int = 20, authorization: str = Header(None), x_admin_key: str = Header(None)):
     """Unified LIVE view for the dashboard:
       gpu/model/swapping, broker running+queued GPU jobs, in-flight gateway requests
-      (translations/LLM/voice happening right now, with owner), and a recent-completed feed."""
+      (translations/LLM/voice happening right now, with owner), and a recent-completed feed.
+    `limit` bounds the recent feed (default 20, max 200) — only the file TAIL is read, so the
+    events log can grow arbitrarily large without slowing the dashboard."""
     _admin(authorization, x_admin_key)
+    limit = max(1, min(int(limit or 20), 200))
     out = {"now": int(time.time())}
     try:
         st = httpx.get(f"{BROKER}/api/state", timeout=8).json()
@@ -781,19 +804,14 @@ def admin_activity(authorization: str = Header(None), x_admin_key: str = Header(
             ({"owner": v["owner"], "service": v["service"], "elapsed": round(now - v["started"], 1)}
              for v in _INFLIGHT.values()), key=lambda x: -x["elapsed"])
     recent = []
-    try:
-        with open(EVENTS_F) as f:
-            lines = f.readlines()[-60:]
-        for ln in reversed(lines):
-            try:
-                e = json.loads(ln)
-                recent.append({"ts": e["ts"], "owner": e.get("owner") or "—",
-                               "service": e["service"], "units": e.get("units", 0),
-                               "tokens": e.get("tokens", 0)})
-            except Exception:
-                pass
-    except Exception:
-        pass
+    for ln in reversed(_tail_lines(EVENTS_F, limit)):
+        try:
+            e = json.loads(ln)
+            recent.append({"ts": e["ts"], "owner": e.get("owner") or "—",
+                           "service": e["service"], "units": e.get("units", 0),
+                           "tokens": e.get("tokens", 0)})
+        except Exception:
+            pass
     out["recent"] = recent
     return out
 
@@ -920,7 +938,8 @@ function copy(t){navigator.clipboard.writeText(t).then(()=>toast('Скопиро
 
 const SVC_ICON={translate:'🌐',llm:'🤖','3d-проект':'🏗️',render:'🎨','голос':'🎙️',voice_translate:'🎙️',voice_chunk:'🎙️','аватар':'🖼️',avatar:'🖼️','дубляж':'🎥',dub:'🎥',project_3d:'🏗️',reference:'🖼️',interior:'🏠',furnish:'🛋️'};
 function svcIco(s){return SVC_ICON[s]||'•';}
-let UTILH=[];let SVRDELTA=0;
+let UTILH=[];let SVRDELTA=0;let RLIMIT=20;
+function moreRecent(){RLIMIT=Math.min(200,RLIMIT+20);loadLoad();}
 function agoS(ts){let d=Math.floor(Date.now()/1000+SVRDELTA-ts);if(d<0)d=0;if(d<60)return d+'с';if(d<3600)return Math.floor(d/60)+'м';if(d<86400)return Math.floor(d/3600)+'ч';return Math.floor(d/86400)+'д';}
 function drawSpark(){const c=$('#spark');if(!c)return;const w=c.clientWidth||300,h=44;c.width=w;c.height=h;const x=c.getContext('2d');x.clearRect(0,0,w,h);
   if(UTILH.length<2)return;const n=UTILH.length,step=w/Math.max(59,n-1);
@@ -928,7 +947,7 @@ function drawSpark(){const c=$('#spark');if(!c)return;const w=c.clientWidth||300
   x.lineTo((n-1)*step,h);x.lineTo(0,h);x.closePath();const g=x.createLinearGradient(0,0,0,h);g.addColorStop(0,'rgba(79,140,255,.35)');g.addColorStop(1,'rgba(79,140,255,.02)');x.fillStyle=g;x.fill();
   x.beginPath();x.moveTo(0,h-(UTILH[0]/100*(h-3))-1);for(let i=1;i<n;i++)x.lineTo(i*step,h-(UTILH[i]/100*(h-3))-1);x.strokeStyle='#4f8cff';x.lineWidth=2;x.stroke();}
 
-async function loadLoad(){try{const s=await (await api('/admin/activity')).json();setConn(true);
+async function loadLoad(){try{const s=await (await api('/admin/activity?limit='+RLIMIT)).json();setConn(true);
   if(s.now)SVRDELTA=s.now-Math.floor(Date.now()/1000);
   const g=s.gpu||{},pct=g.vram_total?Math.round(g.vram_used/g.vram_total*100):0,util=g.util||0;
   UTILH.push(util);if(UTILH.length>60)UTILH.shift();drawSpark();
@@ -947,7 +966,8 @@ async function loadLoad(){try{const s=await (await api('/admin/activity')).json(
   $('#queue').innerHTML=q.length?q.map(j=>'<div class=kcard style=padding:9px_12px><div class=hd><span><span class=badge>#'+j.position+'</span> '+svcIco(j.type)+' '+esc(j.type)+'</span><span class=mut>~'+(j.eta||0)+'с</span></div></div>').join(''):'<div class=mut>очередь пуста</div>';
   // RECENT completed feed
   const r=s.recent||[];
-  $('#recent').innerHTML=r.length?r.slice(0,40).map(e=>'<div class=rrow><span class=rico>'+svcIco(e.service)+'</span><span class=rown>'+esc(e.owner)+'</span><span class=badge style=font-size:10px>'+esc(e.service)+'</span><span class=rmeta>'+e.units+' u'+(e.tokens?' · '+e.tokens+' tok':'')+'</span><span class=rago>'+agoS(e.ts)+'</span></div>').join(''):'<div class=mut>пока пусто</div>';
+  $('#recent').innerHTML=(r.length?r.map(e=>'<div class=rrow><span class=rico>'+svcIco(e.service)+'</span><span class=rown>'+esc(e.owner)+'</span><span class=badge style=font-size:10px>'+esc(e.service)+'</span><span class=rmeta>'+e.units+' u'+(e.tokens?' · '+e.tokens+' tok':'')+'</span><span class=rago>'+agoS(e.ts)+'</span></div>').join(''):'<div class=mut>пока пусто</div>')+
+    (r.length>=RLIMIT?'<div class=acts style=margin-top:10px><button class=ghost style=flex:1 onclick=moreRecent()>↓ Показать больше</button></div>':'');
 }catch(e){}}
 
 async function loadKeys(){try{const d=await (await api('/admin/keys')).json();setConn(true);
