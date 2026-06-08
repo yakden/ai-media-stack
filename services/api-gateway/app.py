@@ -747,8 +747,9 @@ a{color:var(--acc)}
 <div class=hd><h1>🛠️ API-шлюз · Админ</h1><span id=conn class=badge><span class=dot></span>не подключено</span></div>
 <div class=mut>Ключи · лимиты · тариф · живая загрузка и очередь · биллинг</div>
 
-<div class=card id=loginCard>
+<div class=card id=loginCard style=display:none>
   <h3>Admin-ключ</h3>
+  <div class=mut sml style=margin-top:4px>Доступ обычно выдаётся автоматически (вы вошли через SSO). Ключ нужен, только если страница открыта в обход панели.</div>
   <div class="row" style=margin-top:8px>
     <input id=adm type=password placeholder="admin key" style=flex:1>
     <button class=p onclick=saveAdm()>Войти</button>
