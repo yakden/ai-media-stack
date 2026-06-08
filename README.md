@@ -59,23 +59,23 @@ It’s a complete, opinionated reference for **how to ship multiple GPU AI servi
 
 ## 🏛️ Architecture
 
-```
-                         ┌────────────────────────── clients (web / mobile / server / MCP) ──────────────────────────┐
-                         │                                   X-API-Key                                                │
-                         ▼                                                                                            
-                 ┌───────────────┐   keys · quotas · rate-limit · usage · billing · queue info                       
-                 │  API GATEWAY  │  /v1/3d/* /v1/voice/* /v1/avatar /v1/dub /v1/llm/* /v1/translate  + /admin/*       
-                 └──────┬────────┘                                                                                    
-        ┌───────────────┼───────────────────────────────┬───────────────────────────────┐                          
-        ▼               ▼                                ▼                                ▼                          
- ┌─────────────┐ ┌───────────────┐               ┌───────────────┐                ┌───────────────┐                 
- │  GPU BROKER │ │ voice-stream  │               │ dub / animate │                │  ollama (LLM) │                 
- │ queue+swap  │ │ STT·MT·XTTS   │               │ MuseTalk      │                │ qwen / llama  │                 
- └──────┬──────┘ └───────────────┘               └───────────────┘                └───────────────┘                 
-        ▼  (CPU parsers)                                                                                             
- ┌─────────────┐ ┌───────────────┐   single NVIDIA T4 (16 GB): exactly ONE heavy model resident at a time,           
- │ floorplan3d │ │ cubicasa-svc  │   broker swaps {whisper-xtts ⇄ vlm ⇄ render} gracefully between jobs.             
- └─────────────┘ └───────────────┘                                                                                  
+```mermaid
+flowchart TD
+  C["👥 Clients · web · mobile · server · MCP"] -->|X-API-Key| GW
+  GW["🔐 API Gateway<br/>auth · quotas · rate-limit · metering · billing · queue"]
+  GW --> BR["🧮 GPU Broker<br/>FIFO queue · graceful model-swap · ETA"]
+  GW --> VS["🗣️ voice-stream<br/>STT · translate · XTTS clone"]
+  GW --> DA["🎥 dub · 🖼️ avatar<br/>MuseTalk lip-sync"]
+  GW --> LLM["🤖 Ollama<br/>Qwen · Llama"]
+  BR --> FP["🏗️ floorplan3d · CPU<br/>OCR · Mask R-CNN · medial-axis"]
+  BR --> CB["🧩 cubicasa-service · CPU<br/>neural parse · apartments"]
+  subgraph T4["🟩 single NVIDIA T4 · 16 GB — exactly ONE heavy model resident, swapped gracefully"]
+    direction LR
+    M1["whisper-xtts"] <--> M2["vlm (Qwen-VL)"] <--> M3["render (SD+ControlNet)"]
+  end
+  VS -.uses.-> M1
+  BR -.swaps.-> T4
+  LLM -.shares.-> T4
 ```
 
 ## 📦 Services
@@ -91,6 +91,30 @@ It’s a complete, opinionated reference for **how to ship multiple GPU AI servi
 | [`control-plane`](services/control-plane) | 8090 | Ops dashboard (services, GPU, system) |
 | [`floorplan3d`](services/floorplan3d) | 8204 | CPU wrapper: OCR + Mask-R-CNN + medial-axis wall vectorization |
 | [`cubicasa-service`](services/cubicasa-service) | 8205 | CPU wrapper: neural plan parsing (walls/rooms/doors/windows) + colour-based apartments |
+
+## 🌟 Engineering highlights
+
+- **One GPU, many products.** A broker treats the T4 as a scheduled resource — exactly one heavy model
+  resident, swapped **gracefully** (`docker stop/start` + `ollama stop`, never `kill -9`), with a single
+  FIFO queue and rolling-average ETA. Other tenants on the box are never touched.
+- **Multi-tenant from day one.** One API key spans every service; per-key **metering** (requests, weighted
+  units, LLM tokens), **monthly quotas → 402**, **rate limits → 429**, append-only billing audit log, and a
+  live admin dashboard — limits apply on the *very next* request, no restart.
+- **Hybrid CV + neural floor-plan understanding.** A VLM reads *every* label/dimension; a multi-source
+  **scale solver** (dimension chains with outlier rejection + printed areas) fixes OCR misreads; a
+  **medial-axis vectorizer** captures walls of any angle/curve/thickness and classifies load-bearing vs
+  partition; colour-based **apartment segmentation** handles multi-unit floors.
+- **Real-time voice-to-voice in your own voice.** Browser VAD → Whisper → LLM translate → XTTS clone,
+  streamed utterance-by-utterance with a voice library + 58 preset speakers.
+- **Honest licensing.** Third-party models are integrated, not vendored — see [NOTICE](NOTICE.md).
+
+## 🗺️ Roadmap
+
+- [ ] MCP adapter (expose the gateway’s OpenAPI to AI agents via `mcpo`)
+- [ ] Per-key invoice export (CSV/PDF) from the billing event log
+- [ ] Cached XTTS speaker latents (lower voice-clone latency)
+- [ ] Trained floor-plan parser fine-tune for non-coloured / CAD plans
+- [ ] One-command `docker compose` for the whole stack
 
 ## 🚀 Quickstart (one service)
 
