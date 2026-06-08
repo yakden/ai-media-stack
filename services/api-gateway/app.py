@@ -281,21 +281,177 @@ def translate(payload: dict, x_api_key: str = Header(None), authorization: str =
     key = _authq(x_api_key, authorization)
     text = (payload.get("text") or "").strip()
     to = (payload.get("to") or "English").strip()
+    model = _pick_model(payload)
     if not text:
         raise HTTPException(400, "text required")
-    prompt = f"Translate the following text to {to}. Output ONLY the translation, no notes:\n\n{text}"
+    want_detect = bool(payload.get("detect") or payload.get("skip_same"))
+    detected, dtoks = (None, 0)
+    if want_detect:
+        try:
+            detected, dtoks = _detect_lang(text)
+        except Exception:
+            detected = None
+    # skip_same: if already in the target language, don't re-translate (saves cost)
+    if payload.get("skip_same") and detected and detected.lower() in to.lower():
+        _meter(key, "translate", units=1, tokens=dtoks)
+        return {"translation": text, "to": to, "detected_source": detected, "skipped": True}
     try:
         r = httpx.post(f"{OLLAMA}/api/generate",
-                       json={"model": DEFAULT_LLM, "prompt": prompt, "stream": False,
-                             "keep_alive": "5m", "options": {"temperature": 0.2}}, timeout=200)
+                       json={"model": model,
+                             "prompt": f"Translate the following text to {to}. Output ONLY the translation, no notes:\n\n{text}",
+                             "stream": False, "keep_alive": "5m", "options": {"temperature": 0.2}}, timeout=300)
         r.raise_for_status()
         j = r.json()
     except Exception as exc:
         raise HTTPException(502, f"translate error: {exc}")
-    toks = int(j.get("prompt_eval_count", 0)) + int(j.get("eval_count", 0))
+    toks = int(j.get("prompt_eval_count", 0)) + int(j.get("eval_count", 0)) + dtoks
     _meter(key, "translate", units=max(1, toks // 100), tokens=toks)
-    return {"translation": (j.get("response") or "").strip(), "to": to,
-            "tokens": {"prompt": j.get("prompt_eval_count", 0), "completion": j.get("eval_count", 0)}}
+    res = {"translation": (j.get("response") or "").strip(), "to": to, "model": model,
+           "tokens": {"prompt": j.get("prompt_eval_count", 0), "completion": j.get("eval_count", 0)}}
+    if want_detect:
+        res["detected_source"] = detected
+    return res
+
+
+@app.post("/v1/translate/batch")
+def translate_batch(payload: dict, x_api_key: str = Header(None), authorization: str = Header(None)):
+    """Translate MANY strings in one call — for migrating data from another system.
+    Body: {texts:[...], to, from?}. Returns {translations:[...]} (same order, "" for blanks).
+    Metered per non-empty item + by total tokens."""
+    key = _authq(x_api_key, authorization)
+    texts = payload.get("texts")
+    to = (payload.get("to") or "English").strip()
+    model = _pick_model(payload)
+    if not isinstance(texts, list) or not texts:
+        raise HTTPException(400, "texts (non-empty list) required")
+    if len(texts) > 200:
+        raise HTTPException(400, "max 200 items per batch")
+    out, total_toks, billable = [], 0, 0
+    for t in texts:
+        t = ("" if t is None else str(t)).strip()
+        if not t:
+            out.append("")
+            continue
+        try:
+            prompt = f"Translate the following text to {to}. Output ONLY the translation, no notes:\n\n{t}"
+            r = httpx.post(f"{OLLAMA}/api/generate",
+                           json={"model": model, "prompt": prompt, "stream": False,
+                                 "keep_alive": "5m", "options": {"temperature": 0.2}}, timeout=300)
+            r.raise_for_status()
+            j = r.json()
+            out.append((j.get("response") or "").strip())
+            total_toks += int(j.get("prompt_eval_count", 0)) + int(j.get("eval_count", 0))
+            billable += 1
+        except Exception:
+            out.append(None)            # null = this item failed; others still returned
+    if billable:
+        _meter(key, "translate", units=max(billable, total_toks // 100), tokens=total_toks)
+    return {"to": to, "count": len(out), "translated": billable,
+            "translations": out, "tokens": total_toks}
+
+
+def _detect_lang(text):
+    """Detect the source language of a text via the fast LLM. Returns (name, tokens)."""
+    prompt = ("Identify the language of the text below. Reply with ONLY the English name of the "
+              "language as one word (e.g. Russian, English, German, Chinese). Text:\n\n" + text[:500])
+    r = httpx.post(f"{OLLAMA}/api/generate",
+                   json={"model": DEFAULT_LLM, "prompt": prompt, "stream": False,
+                         "keep_alive": "5m", "options": {"temperature": 0, "num_predict": 8}}, timeout=120)
+    r.raise_for_status()
+    j = r.json()
+    lang = (j.get("response") or "").strip().strip(".").split()[0:2]
+    lang = " ".join(lang) if lang else ""
+    return lang, int(j.get("prompt_eval_count", 0)) + int(j.get("eval_count", 0))
+
+
+@app.post("/v1/detect")
+def detect(payload: dict, x_api_key: str = Header(None), authorization: str = Header(None)):
+    """Detect source language. Body: {text} -> {language}; or {texts:[...]} -> {languages:[...]}."""
+    key = _authq(x_api_key, authorization)
+    single = payload.get("text") is not None
+    texts = [payload.get("text")] if single else payload.get("texts")
+    if not isinstance(texts, list) or not texts:
+        raise HTTPException(400, "`text` or `texts` required")
+    if len(texts) > 200:
+        raise HTTPException(400, "max 200 items")
+    out, toks, n = [], 0, 0
+    for t in texts:
+        t = ("" if t is None else str(t)).strip()
+        if not t:
+            out.append("")
+            continue
+        try:
+            lang, tk = _detect_lang(t)
+            out.append(lang)
+            toks += tk
+            n += 1
+        except Exception:
+            out.append(None)
+    if n:
+        _meter(key, "translate", units=max(1, toks // 100), tokens=toks)
+    return ({"language": out[0], "tokens": toks} if single
+            else {"count": len(out), "languages": out, "tokens": toks})
+
+
+def _pick_model(payload):
+    m = payload.get("model") or DEFAULT_LLM
+    if m not in LLM_MODELS:
+        raise HTTPException(400, f"model not allowed; use one of {list(LLM_MODELS)}")
+    return m
+
+
+def _tr_one(text, to, model=DEFAULT_LLM):
+    prompt = f"Translate the following text to {to}. Output ONLY the translation, no notes:\n\n{text}"
+    r = httpx.post(f"{OLLAMA}/api/generate",
+                   json={"model": model, "prompt": prompt, "stream": False,
+                         "keep_alive": "5m", "options": {"temperature": 0.2}}, timeout=300)
+    r.raise_for_status()
+    j = r.json()
+    return (j.get("response") or "").strip(), int(j.get("prompt_eval_count", 0)) + int(j.get("eval_count", 0))
+
+
+@app.post("/v1/translate/multi")
+def translate_multi(payload: dict, x_api_key: str = Header(None), authorization: str = Header(None)):
+    """Translate to MANY target languages at once (multilingual catalogs / data).
+    Body: {text:"..."  OR  texts:[...], to:["English","German","zh-cn", ...]}.
+      • single `text`  -> {"translations": {lang: tr, ...}}
+      • list `texts`   -> {"results":[{"text": orig, "translations": {lang: tr,...}}, ...]}
+    Cap: texts × langs ≤ 200. Metered per produced translation + by total tokens."""
+    key = _authq(x_api_key, authorization)
+    model = _pick_model(payload)
+    to = payload.get("to")
+    if isinstance(to, str):
+        to = [to]
+    if not isinstance(to, list) or not to:
+        raise HTTPException(400, "`to` (list of target languages) required")
+    single = payload.get("text") is not None
+    texts = [payload.get("text")] if single else payload.get("texts")
+    if not isinstance(texts, list) or not texts:
+        raise HTTPException(400, "`text` or `texts` required")
+    if len(texts) * len(to) > 200:
+        raise HTTPException(400, "texts × langs must be ≤ 200")
+    total_toks, billable, results = 0, 0, []
+    for t in texts:
+        t = ("" if t is None else str(t)).strip()
+        trs = {}
+        for lang in to:
+            if not t:
+                trs[lang] = ""
+                continue
+            try:
+                tr, toks = _tr_one(t, lang, model)
+                trs[lang] = tr
+                total_toks += toks
+                billable += 1
+            except Exception:
+                trs[lang] = None
+        results.append({"text": t, "translations": trs})
+    if billable:
+        _meter(key, "translate", units=max(billable, total_toks // 100), tokens=total_toks)
+    if single:
+        return {"to": to, "model": model, "translations": results[0]["translations"], "tokens": total_toks}
+    return {"to": to, "model": model, "count": len(results), "translated": billable,
+            "results": results, "tokens": total_toks}
 
 
 # --------------------------------------------------------------------------- #

@@ -11,9 +11,14 @@ B=https://ai.1c-rus.ru/gw
 # who am I
 curl $B/v1/ping -H "X-API-Key: $KEY"
 
-# translate text
+# translate text (optionally pick a model for higher quality, auto-detect the source)
 curl -X POST $B/v1/translate -H "X-API-Key: $KEY" -H "Content-Type: application/json" \
-     -d '{"text":"Привет, мир","to":"German"}'
+     -d '{"text":"Привет, мир","to":"German","model":"qwen2.5vl:7b","detect":true}'
+# -> {"translation":"Hallo, Welt","to":"German","model":"qwen2.5vl:7b","detected_source":"Russian","tokens":{...}}
+
+# detect language only
+curl -X POST $B/v1/detect -H "X-API-Key: $KEY" -H "Content-Type: application/json" \
+     -d '{"text":"Wie geht es dir?"}'   # -> {"language":"German"}
 
 # LLM chat (models: llama3.2:3b, qwen2.5vl:7b)
 curl -X POST $B/v1/llm/chat -H "X-API-Key: $KEY" -H "Content-Type: application/json" \
@@ -61,6 +66,28 @@ curl -X POST $B/v1/translate/multi -H "X-API-Key: $KEY" -H "Content-Type: applic
 # -> {"results":[{"text":"...","translations":{"English":"...","Spanish":"..."}}, ...]}
 ```
 Cap: texts × langs ≤ 200 · metered per produced translation.
+
+## Choosing the translation model & auto-detect
+
+All translation endpoints (`/v1/translate`, `/v1/translate/batch`, `/v1/translate/multi`) accept an optional
+`"model"` field. Pick the quality/speed trade-off you need:
+
+| Model | Use for |
+|---|---|
+| `llama3.2:3b` *(default)* | fast, light, good for short UI strings / bulk catalogs |
+| `qwen2.5vl:7b` | higher quality, better with long/legal/technical text |
+
+An unknown model returns **HTTP 400** with the allowed list (see `/v1/models`).
+
+Auto-detect the source language with `"detect":true` (adds `"detected_source"` to the response).
+Add `"skip_same":true` to return the original untouched when it's already in the target language —
+handy when migrating mixed-language data so you don't waste tokens re-translating.
+
+```bash
+curl -X POST $B/v1/translate -H "X-API-Key: $KEY" -H "Content-Type: application/json" \
+  -d '{"text":"Already English","to":"English","skip_same":true}'
+# -> {"translation":"Already English","skipped":true,"detected_source":"English","to":"English"}
+```
 
 **Limits:** keys can have a monthly unit **quota** (→ HTTP 402 when reached) and a **rate limit**
 (→ HTTP 429). **Units** are weighted per service (3D project = 10, render = 3, voice = 1, avatar/dub = 20,
