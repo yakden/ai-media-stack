@@ -46,6 +46,22 @@ curl -X POST $B/v1/translate/batch -H "X-API-Key: $KEY" -H "Content-Type: applic
 ```
 Up to 200 items per call · blanks return `""` · a failed item returns `null` (others still come back) · metered per non-empty item.
 
+
+## Multi-language translation (one call → many languages)
+
+```bash
+# single text -> several languages
+curl -X POST $B/v1/translate/multi -H "X-API-Key: $KEY" -H "Content-Type: application/json" \
+  -d '{"text":"Стол дубовый","to":["English","German","French","zh-cn"]}'
+# -> {"translations":{"English":"Oak table","German":"Eichentisch","French":"...","zh-cn":"..."}}
+
+# many texts × many languages (matrix)
+curl -X POST $B/v1/translate/multi -H "X-API-Key: $KEY" -H "Content-Type: application/json" \
+  -d '{"texts":["Статус: оплачен","Доставка завтра"],"to":["English","Spanish"]}'
+# -> {"results":[{"text":"...","translations":{"English":"...","Spanish":"..."}}, ...]}
+```
+Cap: texts × langs ≤ 200 · metered per produced translation.
+
 **Limits:** keys can have a monthly unit **quota** (→ HTTP 402 when reached) and a **rate limit**
 (→ HTTP 429). **Units** are weighted per service (3D project = 10, render = 3, voice = 1, avatar/dub = 20,
 LLM = ~tokens/100). Billing = `units × price_per_unit`.
