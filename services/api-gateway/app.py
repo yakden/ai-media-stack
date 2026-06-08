@@ -849,9 +849,9 @@ async function createKey(){const o=$('#newOwner').value.trim();if(!o){toast('В�
   box.innerHTML='Ключ для <b>'+esc(o)+'</b> (показывается один раз):<div class="mono" style=margin-top:6px;word-break:break-all>'+d.api_key+'</div><button class=p style=margin-top:8px onclick="copy(\''+d.api_key+'\')">⧉ Скопировать</button>';
   $('#newOwner').value='';$('#newQuota').value='';$('#newRate').value='';toast('Ключ выдан ✓');loadKeys();}
 
-function refresh(login){if(!ADM){setConn(false);return;}loadLoad();loadKeys();if(login)toast('Подключено');}
-setInterval(()=>{if(ADM)loadLoad();},2500);
-setInterval(()=>{if(ADM)loadKeys();},9000);
+function refresh(login){loadLoad();loadKeys();if(login)toast('Подключено');}
+setInterval(loadLoad,2500);
+setInterval(loadKeys,9000);
 setInterval(()=>$('#clock').textContent=new Date().toLocaleTimeString(),1000);
 refresh();
 </script></body></html>"""
