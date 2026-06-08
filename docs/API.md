@@ -34,6 +34,18 @@ curl -X POST $B/v1/voice/translate -H "X-API-Key: $KEY" \
 curl $B/v1/billing -H "X-API-Key: $KEY"
 ```
 
+
+## Batch translation (for migrating data from another system)
+
+Translate many fields/rows in one call:
+
+```bash
+curl -X POST $B/v1/translate/batch -H "X-API-Key: $KEY" -H "Content-Type: application/json" \
+  -d '{"to":"English","texts":["Заказ №123","Статус: оплачен","Адрес: Москва"]}'
+# -> {"to":"English","count":3,"translated":3,"translations":["Order #123","Status: paid","Address: Moscow"],"tokens":...}
+```
+Up to 200 items per call · blanks return `""` · a failed item returns `null` (others still come back) · metered per non-empty item.
+
 **Limits:** keys can have a monthly unit **quota** (→ HTTP 402 when reached) and a **rate limit**
 (→ HTTP 429). **Units** are weighted per service (3D project = 10, render = 3, voice = 1, avatar/dub = 20,
 LLM = ~tokens/100). Billing = `units × price_per_unit`.
