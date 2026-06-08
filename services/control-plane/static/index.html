@@ -1,0 +1,178 @@
+<!doctype html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>AI Control Plane</title>
+<style>
+  :root{--bg:#0e1116;--card:#171c24;--mut:#8b97a7;--acc:#4f8cff;--ok:#2ecc71;--bad:#e74c3c;--warn:#f1c40f;--line:#222a35}
+  *{box-sizing:border-box}
+  body{margin:0;background:var(--bg);color:#e6edf3;font:14px/1.5 system-ui,Segoe UI,Roboto,sans-serif}
+  header{padding:16px 22px;border-bottom:1px solid var(--line);display:flex;align-items:center;gap:14px;flex-wrap:wrap}
+  h1{font-size:17px;margin:0;font-weight:600}
+  .key{margin-left:auto;display:flex;gap:8px;align-items:center}
+  input{background:#0b0e13;border:1px solid var(--line);color:#e6edf3;padding:7px 10px;border-radius:8px;font-size:13px;width:230px}
+  button{background:#222a35;border:1px solid var(--line);color:#e6edf3;padding:7px 12px;border-radius:8px;cursor:pointer;font-size:13px}
+  button:hover{border-color:var(--acc)}
+  button.p{background:var(--acc);border-color:var(--acc);color:#fff}
+  .wrap{padding:22px;display:grid;gap:18px;max-width:1100px;margin:0 auto}
+  .row{display:grid;grid-template-columns:repeat(auto-fit,minmax(260px,1fr));gap:14px}
+  .card{background:var(--card);border:1px solid var(--line);border-radius:12px;padding:16px}
+  .card h3{margin:0 0 4px;font-size:15px}
+  .sub{color:var(--mut);font-size:12px}
+  .dot{display:inline-block;width:9px;height:9px;border-radius:50%;margin-right:7px;vertical-align:middle}
+  .bar{height:9px;background:#0b0e13;border-radius:6px;overflow:hidden;margin-top:8px}
+  .bar>i{display:block;height:100%;background:linear-gradient(90deg,var(--acc),#7aa7ff)}
+  .acts{display:flex;gap:8px;margin-top:13px;flex-wrap:wrap}
+  .acts button{flex:1;min-width:64px}
+  .stat{display:flex;justify-content:space-between;padding:3px 0;border-bottom:1px solid var(--line)}
+  .stat:last-child{border:0}
+  table{width:100%;border-collapse:collapse;font-size:12px;margin-top:8px}
+  td,th{text-align:left;padding:4px 6px;border-bottom:1px solid var(--line)}
+  .muted{color:var(--mut)}
+  #toast{position:fixed;bottom:18px;right:18px;background:#171c24;border:1px solid var(--line);padding:11px 15px;border-radius:10px;display:none;max-width:420px;white-space:pre-wrap}
+  a.tool{display:block;text-decoration:none;color:inherit;background:var(--card);border:1px solid var(--line);border-radius:12px;padding:16px;transition:border-color .15s,transform .15s}
+  a.tool:hover{border-color:var(--acc);transform:translateY(-2px)}
+  a.tool .ico{font-size:24px;line-height:1}
+  a.tool h3{margin:8px 0 4px;font-size:15px}
+  a.tool .go{color:var(--acc);font-size:13px;margin-top:10px}
+</style>
+</head>
+<body>
+<header>
+  <h1>🛰️ AI Control Plane</h1>
+  <span class="sub" id="clock"></span>
+  <div class="key">
+    <input id="apikey" type="password" placeholder="API key">
+    <button class="p" onclick="saveKey()">Сохранить</button>
+  </div>
+</header>
+
+<div class="wrap">
+  <div class="row">
+    <div class="card">
+      <h3>GPU</h3>
+      <div id="gpuname" class="sub">—</div>
+      <div class="bar"><i id="gpubar" style="width:0%"></i></div>
+      <div class="sub" id="gpumem" style="margin-top:6px">—</div>
+      <table id="gpuprocs"></table>
+    </div>
+    <div class="card">
+      <h3>Система</h3>
+      <div id="sys"></div>
+    </div>
+  </div>
+
+  <div>
+    <h3 style="margin:0 0 10px">Инструменты</h3>
+    <div class="row">
+      <a class="tool" href="/dub/">
+        <div class="ico">🎥</div>
+        <h3>Веб-дубляж</h3>
+        <div class="sub">Камера → перевод → твой голос → липсинк</div>
+        <div class="go">Открыть →</div>
+      </a>
+      <a class="tool" href="/animate/">
+        <div class="ico">🖼️</div>
+        <h3>Аватар из фото</h3>
+        <div class="sub">Текст + фото → говорящее видео</div>
+        <div class="go">Открыть →</div>
+      </a>
+      <a class="tool" href="/voicestream/">
+        <div class="ico">🎙️</div>
+        <h3>Поточный перевод голоса</h3>
+        <div class="sub">Микрофон → перевод → твой голос (в реальном времени)</div>
+        <div class="go">Открыть →</div>
+      </a>
+      <a class="tool" href="/interior3d/">
+        <div class="ico">🏠</div>
+        <h3>Интерьер 3D</h3>
+        <div class="sub">План → 3D-сцена · фотореализм · меблировка</div>
+        <div class="go">Открыть →</div>
+      </a>
+      <a class="tool" href="/broker/">
+        <div class="ico">🧮</div>
+        <h3>GPU Очередь</h3>
+        <div class="sub">Очередь заданий · авто-своп моделей · ETA</div>
+        <div class="go">Открыть →</div>
+      </a>
+      <a class="tool" href="/gwadmin/admin/ui">
+        <div class="ico">🛠️</div>
+        <h3>API · Биллинг</h3>
+        <div class="sub">Ключи · лимиты · загрузка · очередь · счета</div>
+        <div class="go">Открыть →</div>
+      </a>
+    </div>
+  </div>
+
+  <div>
+    <h3 style="margin:0 0 10px">Сервисы (суперагенты)</h3>
+    <div class="row" id="services"></div>
+  </div>
+</div>
+
+<div id="toast"></div>
+
+<script>
+const $ = s => document.querySelector(s);
+let KEY = localStorage.getItem('cp_key') || '';
+$('#apikey').value = KEY;
+function saveKey(){ KEY = $('#apikey').value.trim(); localStorage.setItem('cp_key', KEY); refresh(); toast('Ключ сохранён'); }
+function toast(m){ const t=$('#toast'); t.textContent=m; t.style.display='block'; clearTimeout(t._h); t._h=setTimeout(()=>t.style.display='none',4000); }
+async function api(path, method='GET'){
+  const r = await fetch('/api'+path, {method, headers:{'Authorization':'Bearer '+KEY}});
+  if(r.status===401){ toast('401 — неверный/пустой ключ'); throw new Error('401'); }
+  return r.json();
+}
+function color(state, healthy){ if(state==='running'&&healthy) return 'var(--ok)'; if(state==='running') return 'var(--warn)'; return 'var(--bad)'; }
+
+async function loadServices(){
+  try{
+    const d = await api('/services');
+    $('#services').innerHTML = d.services.map(s=>`
+      <div class="card">
+        <h3><span class="dot" style="background:${color(s.state,s.healthy)}"></span>${s.title}</h3>
+        <div class="sub">${s.name} · порт ${s.port} · ${s.state}${s.healthy?' · healthy':''}</div>
+        <div class="acts">
+          <button onclick="act('${s.name}','start')">Start</button>
+          <button onclick="act('${s.name}','restart')">Restart</button>
+          <button onclick="act('${s.name}','stop')">Stop</button>
+          ${s.url?`<a href="${s.url}" target="_blank" rel="noopener" style="flex:1;min-width:64px"><button class="p" style="width:100%">Открыть ↗</button></a>`:''}
+        </div>
+      </div>`).join('');
+  }catch(e){ $('#services').innerHTML='<div class="card muted">Введите API key вверху справа.</div>'; }
+}
+async function act(name, action){
+  toast(name+': '+action+'…');
+  try{ const r = await api('/services/'+name+'/'+action,'POST'); toast(name+' '+action+(r.ok?' ✓':' ✗')+'\n'+(r.log||'').slice(-300)); }
+  catch(e){}
+  setTimeout(loadServices, 1500);
+}
+async function loadGpu(){
+  try{
+    const g = await api('/gpu');
+    if(!g.available){ $('#gpuname').textContent='нет GPU'; return; }
+    $('#gpuname').textContent = g.name+'  ·  util '+g.util+'%  ·  '+g.temp+'°C';
+    const pct = Math.round(g.mem_used/g.mem_total*100);
+    $('#gpubar').style.width = pct+'%';
+    $('#gpumem').textContent = g.mem_used+' / '+g.mem_total+' MiB ('+pct+'%) · free '+g.mem_free;
+    $('#gpuprocs').innerHTML = '<tr><th>PID</th><th>MiB</th><th>процесс</th></tr>'+
+      (g.procs.length?g.procs.map(p=>`<tr><td>${p.pid}</td><td>${p.mem_mib}</td><td class="muted">${p.name}</td></tr>`).join(''):'<tr><td colspan=3 class="muted">нет процессов</td></tr>');
+  }catch(e){}
+}
+async function loadSys(){
+  try{
+    const s = await api('/system');
+    $('#sys').innerHTML = `
+      <div class="stat"><span>RAM</span><span>${s.ram_avail_gb} / ${s.ram_total_gb} GB free</span></div>
+      <div class="stat"><span>Диск /</span><span>${s.disk_free_gb} / ${s.disk_total_gb} GB free</span></div>
+      <div class="stat"><span>Время</span><span>${s.time}</span></div>`;
+  }catch(e){}
+}
+function refresh(){ loadServices(); loadGpu(); loadSys(); }
+setInterval(refresh, 5000);
+setInterval(()=>{$('#clock').textContent=new Date().toLocaleTimeString()},1000);
+refresh();
+</script>
+</body>
+</html>

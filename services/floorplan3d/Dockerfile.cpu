@@ -1,0 +1,44 @@
+# FloorPlanTo3D Mask R-CNN inference — CPU only (no CUDA, no VRAM contention with
+# the production GPU). Classic Matterport stack: TensorFlow 1.15 + Keras 2.0.8 +
+# Python 3.6. CPU inference of one floor-plan image takes ~10–40 s, which is fine
+# for an interactive test tool and keeps the T4 free for the generative services.
+FROM python:3.6-slim-buster
+
+ENV DEBIAN_FRONTEND=noninteractive PIP_NO_CACHE_DIR=1 PYTHONUNBUFFERED=1
+
+# buster is EOL: its apt repos live on archive.debian.org and the Release files
+# are expired, so repoint and disable the valid-until check. Only libglib2.0-0 +
+# libgomp1 are needed at runtime (OpenCV is the headless wheel — no GUI libs).
+RUN sed -i 's|deb.debian.org|archive.debian.org|g; s|security.debian.org|archive.debian.org|g; /buster-updates/d' /etc/apt/sources.list \
+    && apt-get -o Acquire::Check-Valid-Until=false update \
+    && apt-get install -y --no-install-recommends libglib2.0-0 libgomp1 \
+        tesseract-ocr tesseract-ocr-pol tesseract-ocr-rus tesseract-ocr-eng \
+    && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /app
+RUN pip install --upgrade "pip<21.0" "setuptools<51" wheel
+
+# Pinned scientific stack compatible with TF1.15 + Matterport Mask R-CNN on py3.6.
+# imgaug/Cython are training-only (mrcnn imports imgaug lazily at line 1233) and are
+# omitted — that also avoids pip trying to build opencv-python from source (no gcc).
+# All of these have cp36 manylinux wheels, so the build is wheel-only and fast.
+RUN pip install \
+        numpy==1.18.5 \
+        tensorflow==1.15.5 \
+        keras==2.0.8 \
+        h5py==2.10.0 \
+        scipy==1.4.1 \
+        scikit-image==0.16.2 \
+        opencv-python-headless==4.5.3.56 \
+        Pillow==8.2.0 \
+        matplotlib==3.3.4 \
+        Flask==2.0.1 Flask-Cors==3.0.10 Werkzeug==2.0.1 \
+        itsdangerous==2.0.1 Jinja2==3.0.1 MarkupSafe==2.0.1 click==8.0.1 \
+        pytesseract==0.3.8
+
+COPY mrcnn ./mrcnn
+COPY application.py serve.py ./
+COPY weights ./weights
+
+EXPOSE 8204
+CMD ["python", "serve.py"]

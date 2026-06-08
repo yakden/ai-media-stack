@@ -1,0 +1,19 @@
+FROM python:3.10-slim
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    libgl1 libglib2.0-0 && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /app
+RUN pip install --no-cache-dir \
+    torch==2.2.2 torchvision==0.17.2 --index-url https://download.pytorch.org/whl/cpu
+RUN pip install --no-cache-dir \
+    "numpy==1.26.4" "scikit-image==0.22.0" "scipy==1.11.4" \
+    "matplotlib==3.8.4" "opencv-python-headless==4.9.0.80" "Pillow==10.3.0" \
+    shapely lmdb svgpathtools "flask==3.0.3" sknw networkx
+
+COPY floortrans /app/floortrans
+COPY infer_cubi.py /app/infer_cubi.py
+COPY serve_cubi.py /app/serve_cubi.py
+COPY model /app/model
+EXPOSE 8205
+CMD ["python", "/app/serve_cubi.py"]

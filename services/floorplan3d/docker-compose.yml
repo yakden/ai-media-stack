@@ -1,0 +1,11 @@
+services:
+  floorplan3d:
+    build:
+      context: .
+      dockerfile: Dockerfile.cpu
+    image: floorplan3d:cpu
+    container_name: floorplan3d
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:8204:8204"   # loopback; reached via interior3d-web / gateway
+    # CPU only — intentionally no GPU reservation (keeps the T4 free for generation).

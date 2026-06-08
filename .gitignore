@@ -1,0 +1,27 @@
+# secrets — never commit
+*.env
+.env
+*.key
+# runtime / generated data
+**/keys.json
+**/usage.json
+**/jobmap.json
+**/events.jsonl
+**/scenes/
+**/projects/
+**/inventory/
+**/results/
+**/voices/
+**/uploads/
+**/log/
+**/model/
+**/weights/
+*.pth
+*.pkl
+*.onnx
+*.ckpt
+# python
+__pycache__/
+*.pyc
+.venv/
+venv/

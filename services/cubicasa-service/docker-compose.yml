@@ -1,0 +1,10 @@
+services:
+  cubicasa:
+    build:
+      context: .
+      dockerfile: Dockerfile.cpu
+    image: cubicasa:cpu
+    container_name: cubicasa
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:8205:8205"   # loopback; CPU service, no T4 needed
