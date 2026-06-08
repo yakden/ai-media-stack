@@ -40,6 +40,23 @@ It’s a complete, opinionated reference for **how to ship multiple GPU AI servi
 | 🧮 **GPU broker** | One resident model on the T4, graceful auto-swap, single FIFO queue, live position/ETA. |
 | 🔐 **API gateway** | API-key auth, per-key usage + tokens, **monthly quotas (402)**, **rate limits (429)**, billing, audit log, admin dashboard. |
 
+## 📸 Screenshots
+
+| Floor-plan → 3D + photoreal render | GPU broker — live model-swap & queue |
+|:--:|:--:|
+| ![pipeline](docs/img/pipeline-render.jpg) | ![broker](docs/img/gpu-broker.jpg) |
+| *Neural reasoning per floor → typed rooms → photoreal per-room renders.* | *One T4: which model is resident, VRAM, queue, start/stop per service.* |
+
+| Wall vectorization (load-bearing vs partition) | Apartment segmentation (multi-unit floor) |
+|:--:|:--:|
+| ![walls](docs/img/wall-vectorization.png) | ![apartments](docs/img/apartment-segmentation.png) |
+| *Medial-axis walls of any angle/curve; 🔴 load-bearing, 🟢 partition.* | *Each apartment auto-detected & outlined on a building floor.* |
+
+| Full wall network from a raster plan | API admin — keys · limits · billing · load |
+|:--:|:--:|
+| ![network](docs/img/wall-network.png) | ![admin](docs/img/api-admin.jpg) |
+| *Walls extracted 1:1 from the drawing (frame/noise rejected).* | *Issue keys, set quotas/rate-limits, watch load & queue, see billing.* |
+
 ## 🏛️ Architecture
 
 ```
