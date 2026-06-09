@@ -40,6 +40,9 @@ CUBI_URL = "http://127.0.0.1:8205"        # CubiCasa5k neural parser (CPU)
 OLLAMA = "http://127.0.0.1:11434"
 VLM_MODEL = "qwen2.5vl:7b"
 DUTY = ["whisper-xtts-server", "avatar-muse"]   # default resident models (STT/TTS, avatar)
+# heavy translation LLMs that need the WHOLE GPU — run via /api/llm, which swaps everything
+# else off (whisper/avatar/render/vlm) so the model loads fully on the T4 (no CPU offload).
+HEAVY_LLM_MODELS = ["translategemma:12b"]
 
 JOB_TYPES = {"render", "furnish", "interior", "reference"}
 FURNISH_SUFFIX = (", fully furnished, sofa, bed, dining table, wardrobe, rugs, plants, "
@@ -110,6 +113,7 @@ READ_ALL_PROMPT = (
 app = FastAPI(title="gpu-broker")
 
 _lock = threading.Lock()
+_swap_lock = threading.Lock()          # serialize GPU model swaps (worker restore vs /api/llm)
 _jobs: dict[str, dict] = {}
 _order: list[str] = []                 # submission order
 _state = {"model": "whisper", "swapping": None, "idle_since": time.time()}
@@ -144,36 +148,43 @@ TTS_URL = "http://127.0.0.1:8000"        # whisper-xtts (duty)
 
 
 def _swap_to(target):
-    """Keep exactly one resident model on the T4. target in {whisper, vlm, render}."""
-    # only short-circuit if the target is ALSO actually alive — guards against a state
-    # desync (e.g. broker restarted while duty containers were stopped) that would leave
-    # whisper "resident" on paper but the container down (STT/TTS 000).
-    alive = True
-    if target == "render":
-        alive = _alive(RENDER_URL)
-    elif target == "whisper":
-        alive = _alive(TTS_URL)
-    if _state["model"] == target and alive:
-        return
-    _state["swapping"] = {"whisper": "Возврат STT/TTS…", "vlm": "Загрузка qwen2.5vl (анализ плана)…",
-                          "render": "Загрузка рендера (SD)…"}.get(target, "Своп…")
-    if target != "render":
-        _sh(["sudo", "docker", "stop", RENDER_CONTAINER])
-    if target != "whisper":
-        _sh(["sudo", "docker", "stop", *DUTY])
-    if target != "vlm":
-        _sh(["sudo", "docker", "exec", "ollama", "ollama", "stop", VLM_MODEL], 30)
-    if target == "render":
-        _sh(["sudo", "docker", "compose", "-f", RENDER_COMPOSE, "up", "-d"])
-        for _ in range(120):
-            if _alive(RENDER_URL):
-                break
-            time.sleep(2)
-    elif target == "whisper":
-        _sh(["sudo", "docker", "start", *DUTY])
-    # vlm: ollama container stays up; qwen loads on first call with free VRAM
-    _state["model"] = target
-    _state["swapping"] = None
+    """Keep exactly one resident model on the T4. target in {whisper, vlm, render, llm}.
+    Serialized by _swap_lock so the idle-restore (worker thread) and /api/llm (request
+    thread) can never interleave docker stop/start on the GPU."""
+    with _swap_lock:
+        # only short-circuit if the target is ALSO actually alive — guards against a state
+        # desync (e.g. broker restarted while duty containers were stopped) that would leave
+        # whisper "resident" on paper but the container down (STT/TTS 000).
+        alive = True
+        if target == "render":
+            alive = _alive(RENDER_URL)
+        elif target == "whisper":
+            alive = _alive(TTS_URL)
+        if _state["model"] == target and alive:
+            return
+        _state["swapping"] = {"whisper": "Возврат STT/TTS…", "vlm": "Загрузка qwen2.5vl (анализ плана)…",
+                              "render": "Загрузка рендера (SD)…",
+                              "llm": "Освобождаю GPU под перевод (LLM)…"}.get(target, "Своп…")
+        if target != "render":
+            _sh(["sudo", "docker", "stop", RENDER_CONTAINER])
+        if target != "whisper":
+            _sh(["sudo", "docker", "stop", *DUTY])
+        if target != "vlm":
+            _sh(["sudo", "docker", "exec", "ollama", "ollama", "stop", VLM_MODEL], 30)
+        if target != "llm":                       # leaving LLM mode -> unload the heavy model
+            for _m in HEAVY_LLM_MODELS:
+                _sh(["sudo", "docker", "exec", "ollama", "ollama", "stop", _m], 30)
+        if target == "render":
+            _sh(["sudo", "docker", "compose", "-f", RENDER_COMPOSE, "up", "-d"])
+            for _ in range(120):
+                if _alive(RENDER_URL):
+                    break
+                time.sleep(2)
+        elif target == "whisper":
+            _sh(["sudo", "docker", "start", *DUTY])
+        # vlm: ollama container stays up; qwen loads on first call with free VRAM
+        _state["model"] = target
+        _state["swapping"] = None
 
 
 def _restore_duty():
@@ -970,6 +981,40 @@ async def enqueue_project(files: List[UploadFile] = File(...),
                       "project": None, "reasoning": None, "raw": None}
         _order.append(jid)
     return {"id": jid, "queued": True, "files": len(srcs), "render": bool(render)}
+
+
+_llm_lock = threading.Lock()
+
+
+@app.post("/api/llm")
+def api_llm(payload: dict):
+    """Run a heavy LLM with the WHOLE GPU. Swaps every other model off the T4
+    (whisper/avatar/render/vlm) so the model loads fully on-GPU (no CPU offload),
+    runs the generate, and lets the idle-restore bring the duty model back afterwards.
+    Serialized: only one heavy LLM call runs at a time; waits out any running GPU job."""
+    model = (payload or {}).get("model")
+    if not model:
+        raise HTTPException(400, "model required")
+    with _llm_lock:
+        # don't yank the GPU out from under a running broker job — wait for it to finish
+        for _ in range(2400):
+            with _lock:
+                busy = any(_jobs[j]["status"] == "running" for j in _order)
+            if not busy:
+                break
+            time.sleep(0.5)
+        _swap_to("llm")                       # stop everything else -> full GPU
+        _state["idle_since"] = time.time()
+        try:
+            body = {**payload, "stream": False}
+            body.setdefault("keep_alive", "5m")
+            r = httpx.post(OLLAMA + "/api/generate", json=body, timeout=600)
+            r.raise_for_status()
+            return JSONResponse(r.json())
+        except httpx.HTTPError as exc:
+            raise HTTPException(502, f"llm error: {exc}")
+        finally:
+            _state["idle_since"] = time.time()  # start the idle clock -> duty restored in ~25s
 
 
 @app.get("/api/state")

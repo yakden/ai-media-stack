@@ -390,12 +390,7 @@ def translate(payload: dict, x_api_key: str = Header(None), authorization: str =
         _meter(key, "translate", units=1, tokens=dtoks)
         return {"translation": text, "to": to, "detected_source": detected, "skipped": True}
     try:
-        r = httpx.post(f"{OLLAMA}/api/generate",
-                       json={"model": model,
-                             "prompt": f"Translate the following text to {to}. Output ONLY the translation, no notes:\n\n{text}",
-                             "stream": False, "keep_alive": "5m", "options": {"temperature": 0.2}}, timeout=300)
-        r.raise_for_status()
-        j = r.json()
+        j = _gen(model, f"Translate the following text to {to}. Output ONLY the translation, no notes:\n\n{text}")
     except Exception as exc:
         raise HTTPException(502, f"translate error: {exc}")
     toks = int(j.get("prompt_eval_count", 0)) + int(j.get("eval_count", 0)) + dtoks
@@ -428,11 +423,7 @@ def translate_batch(payload: dict, x_api_key: str = Header(None), authorization:
             continue
         try:
             prompt = f"Translate the following text to {to}. Output ONLY the translation, no notes:\n\n{t}"
-            r = httpx.post(f"{OLLAMA}/api/generate",
-                           json={"model": model, "prompt": prompt, "stream": False,
-                                 "keep_alive": "5m", "options": {"temperature": 0.2}}, timeout=300)
-            r.raise_for_status()
-            j = r.json()
+            j = _gen(model, prompt)
             out.append((j.get("response") or "").strip())
             total_toks += int(j.get("prompt_eval_count", 0)) + int(j.get("eval_count", 0))
             billable += 1
@@ -494,13 +485,27 @@ def _pick_model(payload):
     return m
 
 
+# Heavy models that get the WHOLE GPU via the broker (it swaps whisper/avatar/render/vlm
+# off first, so the model loads fully on-GPU = fast, instead of CPU-offloading next to whisper).
+BROKER_LLM = {"translategemma:12b"}
+
+
+def _gen(model, prompt, options=None, timeout=600):
+    """Run an Ollama generate. Heavy models route through the broker (/api/llm) so they
+    get the full GPU; light models hit Ollama directly. Returns the Ollama JSON dict."""
+    body = {"model": model, "prompt": prompt, "stream": False, "keep_alive": "5m",
+            "options": options or {"temperature": 0.2}}
+    if model in BROKER_LLM:
+        r = httpx.post(f"{BROKER}/api/llm", json=body, timeout=timeout)
+    else:
+        r = httpx.post(f"{OLLAMA}/api/generate", json=body, timeout=timeout)
+    r.raise_for_status()
+    return r.json()
+
+
 def _tr_one(text, to, model=DEFAULT_LLM):
     prompt = f"Translate the following text to {to}. Output ONLY the translation, no notes:\n\n{text}"
-    r = httpx.post(f"{OLLAMA}/api/generate",
-                   json={"model": model, "prompt": prompt, "stream": False,
-                         "keep_alive": "5m", "options": {"temperature": 0.2}}, timeout=300)
-    r.raise_for_status()
-    j = r.json()
+    j = _gen(model, prompt)
     return (j.get("response") or "").strip(), int(j.get("prompt_eval_count", 0)) + int(j.get("eval_count", 0))
 
 
