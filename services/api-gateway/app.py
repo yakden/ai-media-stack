@@ -25,10 +25,15 @@ BROKER = "http://127.0.0.1:8092"
 OLLAMA = "http://127.0.0.1:11434"
 ADMIN_KEY = os.environ.get("API_ADMIN_KEY", "")
 # LLMs exposed through the gateway (allowlist). llama3.2 = light/fast (translate, chat);
-# qwen2.5vl = heavier multimodal — note it competes for VRAM with the broker's resident model.
+# qwen2.5vl = heavier multimodal; eurollm/translategemma = translation-specialised (heavier, Q6_K) —
+# all the 7B+ models compete for VRAM with the broker's resident model (see VRAM note in README).
 LLM_MODELS = {"llama3.2:3b": "fast text LLM (translate/chat)",
-              "qwen2.5vl:7b": "multimodal vision-language (heavier)"}
+              "qwen2.5vl:7b": "multimodal vision-language (heavier)",
+              "eurollm:9b": "EuroLLM-9B — translation-tuned for 35 European languages (Q6_K)",
+              "translategemma:12b": "TranslateGemma-12B — Google translation model, highest quality (Q6_K)"}
 DEFAULT_LLM = "llama3.2:3b"
+# models best suited for translation, surfaced first in the UI picker
+TRANSLATE_MODELS = ["translategemma:12b", "eurollm:9b", "qwen2.5vl:7b", "llama3.2:3b"]
 DATA = "/opt/api-gateway"
 KEYS_F = os.path.join(DATA, "keys.json")
 USAGE_F = os.path.join(DATA, "usage.json")
@@ -326,8 +331,10 @@ def my_usage(x_api_key: str = Header(None), authorization: str = Header(None)):
 @app.get("/v1/models")
 def models(x_api_key: str = Header(None), authorization: str = Header(None)):
     _auth(x_api_key, authorization)
-    return {"models": [{"id": m, "description": d} for m, d in LLM_MODELS.items()],
-            "default": DEFAULT_LLM}
+    order = TRANSLATE_MODELS + [m for m in LLM_MODELS if m not in TRANSLATE_MODELS]
+    return {"models": [{"id": m, "description": LLM_MODELS[m],
+                        "good_for_translation": m in TRANSLATE_MODELS[:3]} for m in order],
+            "default": DEFAULT_LLM, "translate_recommended": TRANSLATE_MODELS[:3]}
 
 
 @app.post("/v1/llm/chat")

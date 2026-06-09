@@ -76,6 +76,10 @@ All translation endpoints (`/v1/translate`, `/v1/translate/batch`, `/v1/translat
 |---|---|
 | `llama3.2:3b` *(default)* | fast, light, good for short UI strings / bulk catalogs |
 | `qwen2.5vl:7b` | higher quality, better with long/legal/technical text |
+| `eurollm:9b` | **translation-tuned** for 35 European languages (Q6_K); fits fully on GPU — good quality/speed balance |
+| `translategemma:12b` | Google **TranslateGemma** (Q6_K) — highest translation quality; heaviest, slower under concurrent GPU load |
+
+`GET /v1/models` returns `translate_recommended` (best-for-translation first) so a client can default sensibly.
 
 An unknown model returns **HTTP 400** with the allowed list (see `/v1/models`).
 
