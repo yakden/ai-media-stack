@@ -32,7 +32,7 @@ LLM_MODELS = {"llama3.2:3b": "fast text LLM (translate/chat)",
               "qwen2.5vl:7b": "multimodal vision-language (heavier)",
               "eurollm:9b": "EuroLLM-9B — translation-tuned for 35 European languages (Q6_K)",
               "translategemma:12b": "TranslateGemma-12B — Google translation model, highest quality (Q6_K)"}
-DEFAULT_LLM = "llama3.2:3b"
+DEFAULT_LLM = "eurollm:9b"
 # models best suited for translation, surfaced first in the UI picker
 TRANSLATE_MODELS = ["eurollm:9b", "translategemma:12b", "qwen2.5vl:7b", "llama3.2:3b"]
 DATA = "/opt/api-gateway"
