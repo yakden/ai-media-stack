@@ -53,7 +53,7 @@ UNITS = {"project_3d": 10, "project_3d_render": 25, "render": 3, "furnish": 3,
 PRICE_PER_UNIT = float(os.environ.get("API_PRICE_PER_UNIT", "1.0"))   # money per 1 unit (configurable)
 CURRENCY = os.environ.get("API_CURRENCY", "₽")
 
-app = FastAPI(title="ai-api-gateway", version="0.1.0")
+app = FastAPI(title="ai-api-gateway", version="1.0.0")
 
 
 def _load(path, default):

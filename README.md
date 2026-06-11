@@ -8,11 +8,14 @@ Floor-plan → 3D · live voice-to-voice translation in your own voice · video 
 talking avatars · on-box LLMs — all behind one **GPU job-broker** with automatic model-swapping,
 and one **API gateway** with keys, per-key metering, quotas and billing.
 
+![Version](https://img.shields.io/badge/release-v1.0.0-brightgreen)
 ![License](https://img.shields.io/badge/license-MIT-blue)
 ![Python](https://img.shields.io/badge/python-3.10%2B-3776AB)
 ![FastAPI](https://img.shields.io/badge/FastAPI-009688)
 ![Docker](https://img.shields.io/badge/Docker-2496ED)
 ![GPU](https://img.shields.io/badge/GPU-single%20T4%2016GB-76B900)
+
+**[What's new in v1.0 →](CHANGELOG.md)**
 
 </div>
 
@@ -33,12 +36,14 @@ It’s a complete, opinionated reference for **how to ship multiple GPU AI servi
 | Domain | What it does |
 |---|---|
 | 🏗️ **Floor-plan → 3D** | Upload a plan (or photos) → typed rooms, walls (any angle/curve via medial-axis), doors/windows, apartments on multi-unit floors, true scale from printed dimensions, a saved/linkable Three.js 3D scene + render library. |
+| 🌍 **Translation API** | Multilingual machine translation behind one key — **single / batch (≤200) / many-languages-at-once**, source **auto-detect**, and a choice of models (**EuroLLM-9B**, **TranslateGemma-12B**, Qwen, Llama). Concurrent: 8-way parallel, ~3 translations/sec on one GPU. |
 | 🗣️ **Live voice translation** | Stream from the mic → STT → translate → speak back **in your own cloned voice** in another language, near-real-time. Voice library (save/select) + 58 built-in voices with flags & gender. |
 | 🎥 **Video dubbing** | Short clip → translate → your voice → **lip-sync** (MuseTalk). |
 | 🖼️ **Talking avatars** | Photo + text → talking-head video. |
-| 🤖 **On-box LLMs** | Qwen / Llama via the gateway (`/v1/llm/chat`, `/v1/translate`), token-metered. |
-| 🧮 **GPU broker** | One resident model on the T4, graceful auto-swap, single FIFO queue, live position/ETA. |
-| 🔐 **API gateway** | API-key auth, per-key usage + tokens, **monthly quotas (402)**, **rate limits (429)**, billing, audit log, admin dashboard. |
+| 🤖 **On-box LLMs** | Qwen / Llama / EuroLLM / TranslateGemma via the gateway (`/v1/llm/chat`, `/v1/translate`), token-metered. |
+| 🧮 **GPU broker** | One heavy model resident on the T4, graceful auto-swap, single FIFO queue, live position/ETA — translation and voice **coexist**, heavy 3D/render jobs swap on demand. |
+| 🔐 **API gateway** | API-key auth, per-key usage + tokens, **monthly quotas (402)**, **rate limits (429)**, billing, audit log. |
+| 🛠️ **Admin control panel** | Tabbed, mobile-first: live GPU/queue/system monitoring, **start/stop/restart every service**, keys & billing, a launchpad to open the tools, and **add models** (Ollama pull) on the fly. |
 
 ## 📸 Screenshots
 
@@ -106,15 +111,28 @@ flowchart TD
   partition; colour-based **apartment segmentation** handles multi-unit floors.
 - **Real-time voice-to-voice in your own voice.** Browser VAD → Whisper → LLM translate → XTTS clone,
   streamed utterance-by-utterance with a voice library + 58 preset speakers.
+- **One GPU, gracefully shared.** Translation (EuroLLM) and voice (Whisper) co-reside on a 16 GB T4;
+  heavy 3D/render jobs swap the translation model out on demand and restore it when idle. Concurrent
+  translation requests are served in parallel and **fail-fast under contention** instead of piling up —
+  the API stays responsive even when an external client bursts.
 - **Honest licensing.** Third-party models are integrated, not vendored — see [NOTICE](NOTICE.md).
 
 ## 🗺️ Roadmap
 
+**Shipped in v1.0**
+- [x] Multilingual translation API — single / batch / many-languages, source auto-detect, model selection
+- [x] Translation-tuned models (EuroLLM-9B, TranslateGemma-12B) + concurrent serving (8-way parallel)
+- [x] Tabbed, mobile-first **admin control panel** — monitoring, service start/stop, keys & billing, model management
+- [x] GPU orchestration that lets translation + voice **coexist**, heavy jobs swap on demand
+- [x] Concurrency-safe heavy-model routing (no pile-ups under load)
+
+**Next**
 - [ ] MCP adapter (expose the gateway’s OpenAPI to AI agents via `mcpo`)
 - [ ] Per-key invoice export (CSV/PDF) from the billing event log
+- [ ] One-command `docker compose` for the whole stack
+- [ ] Multi-GPU sharding (scale translation throughput past a single T4)
 - [ ] Cached XTTS speaker latents (lower voice-clone latency)
 - [ ] Trained floor-plan parser fine-tune for non-coloured / CAD plans
-- [ ] One-command `docker compose` for the whole stack
 
 ## 🚀 Quickstart (one service)
 
@@ -140,9 +158,27 @@ curl -X POST https://host/gw/admin/keys -H "X-Admin-Key: $ADMIN" -F "owner=Acme"
 curl -X POST https://host/gw/v1/3d/project -H "X-API-Key: $KEY" -F "files=@plan.png"
 #  → {"job_id":"…","queue":{"position":1,"ahead":0,"eta_seconds":42,"total_in_queue":1}}
 
-curl -X POST https://host/gw/v1/translate  -H "X-API-Key: $KEY" -d '{"text":"Привет","to":"German"}'
 curl     https://host/gw/v1/billing        -H "X-API-Key: $KEY"   # your usage + cost
 ```
+
+### 🌍 Translation in one call
+
+```bash
+# single — pick a model, auto-detect the source
+curl -X POST https://host/gw/v1/translate -H "X-API-Key: $KEY" -H "Content-Type: application/json" \
+  -d '{"text":"Договор вступает в силу с момента подписания.","to":"English","model":"eurollm:9b","detect":true}'
+
+# batch up to 200 rows in one request (migrate data from another system)
+curl -X POST https://host/gw/v1/translate/batch -H "X-API-Key: $KEY" -H "Content-Type: application/json" \
+  -d '{"to":"English","texts":["Заказ №123","Статус: оплачен","Адрес: Москва"]}'
+
+# one text → many languages at once
+curl -X POST https://host/gw/v1/translate/multi -H "X-API-Key: $KEY" -H "Content-Type: application/json" \
+  -d '{"text":"Счёт оплачен","to":["English","German","Polish","Ukrainian"]}'
+```
+
+For maximum throughput, send **8 concurrent requests** with a connection-reusing client — the gateway
+serves them in parallel (~3 translations/sec on a single T4). See [docs/API.md](docs/API.md).
 
 ## 🧩 Tech
 

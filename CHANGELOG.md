@@ -1,0 +1,52 @@
+# Changelog
+
+All notable changes to this project are documented here.
+The format is based on [Keep a Changelog](https://keepachangelog.com/), and this project
+adheres to [Semantic Versioning](https://semver.org/).
+
+## [1.0.0] — 2026-06-11
+
+First stable public release. The platform grew from a set of GPU services into a coherent,
+multi-tenant product with a translation API, billing, and a full admin control panel.
+
+### Added
+- **Translation API** behind the gateway:
+  - `POST /v1/translate` — single text, optional source **auto-detect** (`detect`) and `skip_same`.
+  - `POST /v1/translate/batch` — up to 200 strings in one request (data migration).
+  - `POST /v1/translate/multi` — one or many texts → many target languages at once.
+  - `POST /v1/detect` — language detection.
+  - **Model selection** per request (`model`): `eurollm:9b`, `translategemma:12b`, `qwen2.5vl:7b`, `llama3.2:3b`.
+- **Translation-tuned models**: EuroLLM-9B-Instruct and Google TranslateGemma-12B (Q6_K), with a
+  side-by-side speed/quality benchmark across Russian, Polish, Ukrainian and Norwegian.
+- **Concurrent serving** — 8-way parallel translation (~3 translations/sec on one T4) and a
+  connection-reusing reference client.
+- **Admin control panel** (`/admin/ui`) — rebuilt as a tabbed, mobile-first SPA:
+  - **Обзор** — live GPU load + sparkline, "running now", queue, disk/RAM.
+  - **Запуск** — launchpad to open every tool, quick-connect API card, and **model management**
+    (Ollama pull + allow-list toggle, custom service links).
+  - **Сервисы** — start / stop / restart every docker + systemd service from the UI.
+  - **Ключи** — issue keys, set monthly quota & rate limit, see per-key billing.
+  - **Активность** — recent operations feed (tail-read, paginated).
+- **GPU orchestration** — translation and voice co-reside; heavy 3D/render jobs swap the translation
+  model out on demand and the broker restores it on idle. Heavy models can also run with the whole GPU
+  via the broker's `/api/llm` route.
+
+### Changed
+- Default translation model is **EuroLLM-9B** (fast, doesn't disturb voice); TranslateGemma stays opt-in.
+- Admin monitoring works **with or without** the broker (reads `nvidia-smi` + Ollama directly).
+- The model allow-list is now dynamic — models added through the panel become selectable immediately.
+
+### Fixed
+- Heavy-model broker route no longer piles up under concurrent bursts — it **fails fast (503 + retry)**
+  instead of exhausting the thread pool.
+- Admin activity feed prunes stale in-flight entries (no more phantom "hung" sessions).
+- Resolved a GPU out-of-memory condition where a pinned translation model blocked every other service.
+
+## [0.1.0] — 2026-06-08
+
+Initial public release: GPU job-broker with graceful model-swap, the floor-plan → 3D pipeline,
+live voice translation, dubbing, talking avatars, and the first multi-tenant API gateway
+(keys, metering, quotas, rate limits, billing).
+
+[1.0.0]: https://github.com/yakden/ai-media-stack/releases/tag/v1.0.0
+[0.1.0]: https://github.com/yakden/ai-media-stack/releases/tag/v0.1.0
