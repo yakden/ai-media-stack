@@ -14,6 +14,7 @@ from __future__ import annotations
 import json
 import os
 import secrets
+import subprocess
 import threading
 import time
 
@@ -818,13 +819,20 @@ def admin_activity(limit: int = 20, authorization: str = Header(None), x_admin_k
     _admin(authorization, x_admin_key)
     limit = max(1, min(int(limit or 20), 200))
     out = {"now": int(time.time())}
+    broker_up = False
     try:
-        st = httpx.get(f"{BROKER}/api/state", timeout=8).json()
+        st = httpx.get(f"{BROKER}/api/state", timeout=5).json()
+        broker_up = True
     except Exception:
         st = {}
-    out["gpu"] = st.get("gpu", {})
-    out["model"] = st.get("model")
+    out["broker_up"] = broker_up
+    # GPU: prefer the broker's reading; if the broker is off (translation-only mode), read nvidia-smi directly
+    out["gpu"] = st.get("gpu") or _gpu_direct()
+    loaded = _ollama_loaded()
+    out["loaded"] = loaded            # the model actually resident in Ollama right now
+    out["model"] = st.get("model") or (loaded.get("name") if loaded else None)
     out["swapping"] = st.get("swapping")
+    out["system"] = _sysinfo()
     jobs = st.get("jobs", [])
     out["running"] = [j for j in jobs if j.get("status") == "running"]
     out["queued"] = sorted((j for j in jobs if j.get("status") == "queued"),
@@ -851,6 +859,131 @@ def admin_activity(limit: int = 20, authorization: str = Header(None), x_admin_k
     return out
 
 
+def _sysinfo():
+    """Host disk + RAM for the dashboard (disk is the critical 1C-safety metric)."""
+    import shutil
+    info = {}
+    try:
+        du = shutil.disk_usage("/")
+        info["disk_free_gb"] = round(du.free / 1e9, 1)
+        info["disk_total_gb"] = round(du.total / 1e9, 1)
+    except Exception:
+        pass
+    try:
+        mem = {}
+        with open("/proc/meminfo") as f:
+            for ln in f:
+                p = ln.split()
+                if p and p[0].rstrip(":") in ("MemTotal", "MemAvailable"):
+                    mem[p[0].rstrip(":")] = int(p[1]) // 1024
+        info["ram_avail_mb"] = mem.get("MemAvailable", 0)
+        info["ram_total_mb"] = mem.get("MemTotal", 0)
+    except Exception:
+        pass
+    return info
+
+
+def _gpu_direct():
+    """GPU VRAM/util straight from nvidia-smi — used when the broker is off (translation-only mode)."""
+    try:
+        out = subprocess.run(["nvidia-smi", "--query-gpu=memory.used,memory.total,utilization.gpu",
+                              "--format=csv,noheader,nounits"], capture_output=True, text=True,
+                             timeout=10).stdout.strip().split(",")
+        return {"vram_used": int(out[0]), "vram_total": int(out[1]), "util": int(out[2])}
+    except Exception:
+        return {}
+
+
+def _ollama_loaded():
+    """The model currently resident in Ollama (name + VRAM) — what's actually serving translations."""
+    try:
+        ms = httpx.get(f"{OLLAMA}/api/ps", timeout=5).json().get("models", [])
+        if not ms:
+            return None
+        m = ms[0]
+        return {"name": m.get("name"), "vram_mib": round(int(m.get("size_vram", 0)) / 1048576),
+                "expires": m.get("expires_at")}
+    except Exception:
+        return None
+
+
+# Services manageable from the admin panel. kind=docker -> docker start/stop/restart <container>;
+# kind=systemd -> systemctl <action> <unit>. Grouped for the UI.
+SERVICES = [
+    {"name": "ollama", "title": "Ollama — перевод / LLM", "group": "🌐 Перевод",
+     "kind": "docker", "container": "ollama", "health": "http://127.0.0.1:11434/api/version"},
+    {"name": "api-gateway", "title": "API-шлюз (этот сервис)", "group": "🧩 Инфраструктура",
+     "kind": "systemd", "unit": "api-gateway", "self": True},
+    {"name": "gpu-broker", "title": "GPU-брокер (3D / своп моделей)", "group": "🎮 GPU-оркестрация",
+     "kind": "systemd", "unit": "gpu-broker"},
+    {"name": "whisper", "title": "Whisper STT / TTS (голос)", "group": "🎙️ Голос",
+     "kind": "docker", "container": "whisper-xtts-server", "health": "http://127.0.0.1:8000/health"},
+    {"name": "avatar", "title": "Аватар — MuseTalk", "group": "🎙️ Голос",
+     "kind": "docker", "container": "avatar-muse"},
+    {"name": "voice-stream", "title": "Поточный перевод голоса", "group": "🎙️ Голос",
+     "kind": "systemd", "unit": "voice-stream"},
+    {"name": "floorplan3d", "title": "Floorplan 3D (Mask R-CNN, CPU)", "group": "🏗️ 3D / планы",
+     "kind": "docker", "container": "floorplan3d", "health": "http://127.0.0.1:8204/health"},
+    {"name": "cubicasa", "title": "CubiCasa парсер (CPU)", "group": "🏗️ 3D / планы",
+     "kind": "docker", "container": "cubicasa", "health": "http://127.0.0.1:8205/health"},
+    {"name": "interior-render", "title": "Рендер SD + ControlNet (GPU)", "group": "🏗️ 3D / планы",
+     "kind": "docker", "container": "interior-render"},
+    {"name": "control-plane", "title": "Control Plane (общая панель)", "group": "🧩 Инфраструктура",
+     "kind": "systemd", "unit": "control-plane"},
+    {"name": "open-webui", "title": "Open WebUI (чат)", "group": "🧩 Инфраструктура",
+     "kind": "docker", "container": "open-webui", "health": "http://127.0.0.1:8088/health"},
+]
+SVC_BY_NAME = {s["name"]: s for s in SERVICES}
+
+
+def _svc_status(s):
+    if s["kind"] == "docker":
+        rc = subprocess.run(["sudo", "docker", "inspect", "-f", "{{.State.Status}}", s["container"]],
+                            capture_output=True, text=True, timeout=15)
+        status = rc.stdout.strip() if rc.returncode == 0 else "absent"
+        running = status == "running"
+    else:
+        rc = subprocess.run(["systemctl", "is-active", s["unit"]], capture_output=True, text=True, timeout=10)
+        status = rc.stdout.strip() or "unknown"
+        running = status == "active"
+    health = None
+    if running and s.get("health"):
+        try:
+            health = httpx.get(s["health"], timeout=3).status_code < 500
+        except Exception:
+            health = False
+    return {"name": s["name"], "title": s["title"], "group": s["group"], "kind": s["kind"],
+            "status": status, "running": running, "health": health, "self": s.get("self", False)}
+
+
+@app.get("/admin/services")
+def list_services(authorization: str = Header(None), x_admin_key: str = Header(None)):
+    """Status of every manageable service (docker + systemd), grouped, for the control panel."""
+    _admin(authorization, x_admin_key)
+    return {"services": [_svc_status(s) for s in SERVICES]}
+
+
+@app.post("/admin/services/{name}/{action}")
+def control_service(name: str, action: str,
+                    authorization: str = Header(None), x_admin_key: str = Header(None)):
+    """start / stop / restart a service from the panel — applies immediately on the box."""
+    _admin(authorization, x_admin_key)
+    s = SVC_BY_NAME.get(name)
+    if not s:
+        raise HTTPException(404, "unknown service")
+    if action not in ("start", "stop", "restart"):
+        raise HTTPException(400, "action must be start|stop|restart")
+    if s.get("self") and action in ("stop", "restart"):
+        raise HTTPException(400, "нельзя останавливать сам шлюз из его же интерфейса")
+    if s["kind"] == "docker":
+        cmd = ["sudo", "docker", action, s["container"]]
+    else:
+        cmd = ["sudo", "systemctl", action, s["unit"]]
+    rc = subprocess.run(cmd, capture_output=True, text=True, timeout=180)
+    return {"ok": rc.returncode == 0, "name": name, "action": action,
+            "log": ((rc.stdout or "") + (rc.stderr or "")).strip()[-400:]}
+
+
 @app.get("/admin/usage")
 def all_usage(authorization: str = Header(None), x_admin_key: str = Header(None)):
     _admin(authorization, x_admin_key)
@@ -868,154 +1001,217 @@ def health():
     return {"status": "ok"}
 
 
+
 ADMIN_PAGE = r"""<!doctype html><html lang=ru><head><meta charset=utf-8>
-<meta name=viewport content="width=device-width,initial-scale=1"><title>API · Админка</title>
+<meta name=viewport content="width=device-width,initial-scale=1,viewport-fit=cover">
+<title>AI · Админ</title>
 <style>
 :root{--bg:#0c0f14;--card:#161b22;--card2:#1c232d;--line:#2a323d;--mut:#8b97a7;--acc:#4f8cff;--ok:#2ecc71;--warn:#f1c40f;--bad:#e15b64;--txt:#e6edf3}
 *{box-sizing:border-box}
-body{margin:0;background:var(--bg);color:var(--txt);font:15px/1.5 -apple-system,Segoe UI,Roboto,system-ui;max-width:880px;margin:auto;padding:14px 14px 60px}
-h1{font-size:20px;margin:6px 0}h3{margin:0;font-size:16px}
-.mut{color:var(--mut);font-size:13px}.sml{font-size:12px}
-.card{background:var(--card);border:1px solid var(--line);border-radius:16px;padding:16px;margin-top:14px}
-.row{display:flex;gap:10px;flex-wrap:wrap;align-items:center}
-input,select{background:#0b0e13;border:1px solid var(--line);color:var(--txt);padding:11px 12px;border-radius:11px;font-size:15px;outline:none;width:100%}
-input:focus,select:focus{border-color:var(--acc)}
-label.fld{flex:1;min-width:130px}label.fld>span{display:block;color:var(--mut);font-size:11px;margin:0 0 3px 3px}
-button{background:var(--card2);border:1px solid var(--line);color:var(--txt);padding:11px 15px;border-radius:11px;cursor:pointer;font-size:14px;font-weight:600;transition:.12s}
-button:active{transform:scale(.97)}button.p{background:var(--acc);border-color:var(--acc);color:#fff}
-button.d{background:#2a1a1d;border-color:#5a2a32;color:#ff9a9a}button.ghost{background:transparent}
+body{margin:0;background:var(--bg);color:var(--txt);font:15px/1.5 -apple-system,Segoe UI,Roboto,system-ui}
+.hdr{position:sticky;top:0;z-index:20;display:flex;align-items:center;gap:10px;justify-content:space-between;padding:11px 16px;background:rgba(12,15,20,.92);backdrop-filter:blur(8px);border-bottom:1px solid var(--line)}
+.brand{font-weight:700;font-size:16px}
+main{max-width:940px;margin:0 auto;padding:14px}
+h3{margin:0;font-size:15px}.mut{color:var(--mut);font-size:13px}.sml{font-size:12px}
+nav#nav{position:sticky;top:48px;z-index:19;display:flex;gap:6px;max-width:940px;margin:0 auto;padding:8px 14px;background:var(--bg);border-bottom:1px solid var(--line)}
+nav#nav button{flex:1;background:transparent;border:1px solid transparent;color:var(--mut);padding:9px 6px;border-radius:11px;font-size:13px;font-weight:600;cursor:pointer;display:flex;align-items:center;justify-content:center;gap:7px;transition:.12s}
+nav#nav button.on{background:var(--card2);color:var(--txt);border-color:var(--line)}
+nav#nav .ic{font-size:16px}
+.tab[hidden]{display:none}
+.card{background:var(--card);border:1px solid var(--line);border-radius:16px;padding:15px;margin-top:13px}
 .hd{display:flex;align-items:center;gap:10px;justify-content:space-between}
-.badge{display:inline-flex;align-items:center;gap:6px;background:#0b0e13;border:1px solid var(--line);border-radius:999px;padding:4px 11px;font-size:12px}
-.dot{width:9px;height:9px;border-radius:50%;background:#5b6673}.dot.on{background:var(--ok);box-shadow:0 0 8px var(--ok);animation:pulse 1.6s infinite}
-@keyframes pulse{50%{opacity:.45}}
-.bar{height:8px;background:#0b0e13;border-radius:6px;overflow:hidden;margin-top:5px}.bar>i{display:block;height:100%;background:linear-gradient(90deg,var(--acc),#7aa7ff);transition:width .4s}
-.bar.q>i{background:linear-gradient(90deg,var(--ok),#7be0a0)}.bar.q.hot>i{background:linear-gradient(90deg,var(--warn),var(--bad))}
-.kcard{background:var(--card2);border:1px solid var(--line);border-radius:14px;padding:13px;margin-top:10px}
-.kcard.off{opacity:.55}
+.row{display:flex;gap:10px;flex-wrap:wrap;align-items:center}
+.badge{display:inline-flex;align-items:center;gap:6px;background:#0b0e13;border:1px solid var(--line);border-radius:999px;padding:4px 11px;font-size:12px;white-space:nowrap}
+.dot{width:9px;height:9px;border-radius:50%;background:#5b6673;flex:none}.dot.on{background:var(--ok);box-shadow:0 0 8px var(--ok)}.dot.run{background:var(--ok);box-shadow:0 0 8px var(--ok);animation:pulse 1.6s infinite}.dot.bad{background:var(--bad)}.dot.warn{background:var(--warn)}
+@keyframes pulse{50%{opacity:.4}}
+.bar{height:8px;background:#0b0e13;border-radius:6px;overflow:hidden;margin-top:6px}.bar>i{display:block;height:100%;background:linear-gradient(90deg,var(--acc),#7aa7ff);transition:width .4s}
+.bar.hot>i{background:linear-gradient(90deg,var(--warn),var(--bad))}
+button{background:var(--card2);border:1px solid var(--line);color:var(--txt);padding:10px 14px;border-radius:11px;cursor:pointer;font-size:14px;font-weight:600;transition:.12s}
+button:active{transform:scale(.97)}button.p{background:var(--acc);border-color:var(--acc);color:#fff}
+button.d{background:#2a1a1d;border-color:#5a2a32;color:#ff9a9a}button.ghost{background:transparent}button.sm{padding:7px 11px;font-size:13px}
+input{background:#0b0e13;border:1px solid var(--line);color:var(--txt);padding:11px 12px;border-radius:11px;font-size:15px;outline:none;width:100%}
+input:focus{border-color:var(--acc)}
+label.fld{flex:1;min-width:130px}label.fld>span{display:block;color:var(--mut);font-size:11px;margin:0 0 3px 3px}
+.grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:9px}
+.stat{background:#0b0e13;border:1px solid var(--line);border-radius:12px;padding:11px 13px}.stat b{font-size:19px}.stat .mut{font-size:11px}
+.kcard{background:var(--card2);border:1px solid var(--line);border-radius:14px;padding:13px;margin-top:10px}.kcard.off{opacity:.55}
 .mono{font-family:ui-monospace,Menlo,monospace;font-size:12px}
 .sw{position:relative;width:46px;height:26px;flex:none}.sw input{opacity:0;width:0;height:0;position:absolute}
 .sw label{position:absolute;inset:0;background:#3a434f;border-radius:999px;cursor:pointer;transition:.15s}
 .sw label:before{content:"";position:absolute;width:20px;height:20px;left:3px;top:3px;background:#fff;border-radius:50%;transition:.15s}
 .sw input:checked+label{background:var(--ok)}.sw input:checked+label:before{transform:translateX(20px)}
-.grid2{display:grid;grid-template-columns:1fr 1fr;gap:8px}
-.stat{background:#0b0e13;border:1px solid var(--line);border-radius:10px;padding:8px 10px}.stat b{font-size:16px}.stat .mut{font-size:11px}
-.acts{display:flex;gap:8px;margin-top:10px;flex-wrap:wrap}.acts button{flex:1;min-width:90px}
-#toast{position:fixed;left:50%;bottom:22px;transform:translateX(-50%) translateY(80px);background:#1c232d;border:1px solid var(--line);padding:11px 18px;border-radius:12px;opacity:0;transition:.25s;z-index:9;max-width:90vw}
+.svc{display:flex;align-items:center;gap:10px;padding:11px 0;border-bottom:1px solid var(--line);flex-wrap:wrap}.svc:last-child{border:0}
+.svc .nm{font-weight:600;flex:1;min-width:140px}
+.svc .acts{display:flex;gap:6px}
+.grp{margin-top:16px;color:var(--mut);font-size:13px;font-weight:600}
+.acts{display:flex;gap:8px;margin-top:10px;flex-wrap:wrap}.acts>button{flex:1;min-width:88px}
+.rrow{display:flex;align-items:center;gap:8px;padding:7px 2px;border-bottom:1px solid var(--line);font-size:13px}.rrow:last-child{border:0}
+.rico{width:20px;text-align:center;flex:none}.rown{font-weight:600;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;max-width:34%}
+.rmeta{color:var(--mut);font-size:12px;margin-left:auto;white-space:nowrap}.rago{color:var(--mut);font-size:11px;width:44px;text-align:right;flex:none}
+#toast{position:fixed;left:50%;bottom:84px;transform:translateX(-50%) translateY(80px);background:#1c232d;border:1px solid var(--line);padding:11px 18px;border-radius:12px;opacity:0;transition:.25s;z-index:30;max-width:90vw;text-align:center}
 #toast.show{opacity:1;transform:translateX(-50%) translateY(0)}
 .keyout{background:#0b1a10;border:1px solid #2a5a3a;border-radius:11px;padding:10px;margin-top:8px;display:none}
-.rrow{display:flex;align-items:center;gap:8px;padding:7px 4px;border-bottom:1px solid var(--line);font-size:13px}
-.rrow:last-child{border:0}
-.rico{width:20px;text-align:center;flex:none}
-.rown{font-weight:600;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;max-width:38%}
-.rmeta{color:var(--mut);font-size:12px;margin-left:auto;white-space:nowrap}
-.rago{color:var(--mut);font-size:11px;width:42px;text-align:right;flex:none}
+canvas{width:100%;height:46px;display:block;margin-top:10px}
 a{color:var(--acc)}
+@media(max-width:680px){
+  nav#nav{position:fixed;top:auto;bottom:0;left:0;right:0;max-width:none;border-top:1px solid var(--line);border-bottom:0;background:rgba(12,15,20,.96);padding:6px 8px calc(6px + env(safe-area-inset-bottom))}
+  nav#nav button{flex-direction:column;gap:2px;font-size:10px;padding:5px 2px}
+  nav#nav .ic{font-size:19px}
+  main{padding-bottom:84px}
+}
 </style></head><body>
-<div class=hd><h1>🛠️ API-шлюз · Админ</h1><span id=conn class=badge><span class=dot></span>не подключено</span></div>
-<div class=mut>Ключи · лимиты · тариф · живая загрузка и очередь · биллинг</div>
+<div class=hdr><div class=brand>🛠️ AI-платформа · Админ</div><span id=conn class=badge><span class=dot></span>…</span></div>
+<nav id=nav>
+  <button data-tab=overview class=on><span class=ic>📊</span><span>Обзор</span></button>
+  <button data-tab=services><span class=ic>🧩</span><span>Сервисы</span></button>
+  <button data-tab=keys><span class=ic>🔑</span><span>Ключи</span></button>
+  <button data-tab=activity><span class=ic>🕒</span><span>Активность</span></button>
+</nav>
+<main>
 
-<div class=card id=loginCard style=display:none>
-  <h3>Admin-ключ</h3>
-  <div class=mut sml style=margin-top:4px>Доступ обычно выдаётся автоматически (вы вошли через SSO). Ключ нужен, только если страница открыта в обход панели.</div>
-  <div class="row" style=margin-top:8px>
-    <input id=adm type=password placeholder="admin key" style=flex:1>
-    <button class=p onclick=saveAdm()>Войти</button>
+<section id=overview class=tab>
+  <div class=card>
+    <div class=hd><h3>⚡ Нагрузка GPU</h3><span id=clock class="mut sml"></span></div>
+    <div id=gpu class=row style=margin-top:10px></div>
+    <canvas id=spark></canvas>
   </div>
-  <div id=admst class="mut sml" style=margin-top:6px></div>
-</div>
+  <div class=card>
+    <h3>▶️ Выполняется сейчас <span id=ln class="mut sml"></span></h3>
+    <div id=live style=margin-top:8px></div>
+    <h3 style=margin-top:16px>📋 В очереди <span id=qn class="mut sml"></span></h3>
+    <div id=queue style=margin-top:6px></div>
+  </div>
+  <div class=card>
+    <h3>🖥️ Система</h3>
+    <div id=sys class=grid style=margin-top:10px></div>
+  </div>
+</section>
 
-<div class=card>
-  <div class=hd><h3>⚡ Живая загрузка</h3><span id=clock class="mut sml"></span></div>
-  <div id=gpu class=row style=margin-top:10px></div>
-  <canvas id=spark height=44 style="width:100%;margin-top:10px;display:block"></canvas>
-  <h3 style=margin-top:14px>▶️ Выполняется сейчас <span id=ln class="mut sml"></span></h3>
-  <div id=live style=margin-top:6px></div>
-  <h3 style=margin-top:14px>📋 В очереди <span id=qn class="mut sml"></span></h3>
-  <div id=queue style=margin-top:6px></div>
-</div>
+<section id=services class=tab hidden>
+  <div class=card>
+    <div class=hd><h3>🧩 Управление сервисами</h3><button class="ghost sm" onclick=loadServices()>↻ Обновить</button></div>
+    <div class=mut sml style=margin-top:4px>Старт/стоп/рестарт применяются сразу на сервере.</div>
+    <div id=services-list style=margin-top:6px></div>
+  </div>
+</section>
 
-<div class=card>
-  <div class=hd><h3>🕒 Последние операции</h3><span class="mut sml">кто · что · сколько</span></div>
-  <div id=recent style=margin-top:8px></div>
-</div>
-
-<div class=card>
-  <div class=hd><h3>🔑 Ключи и лимиты</h3><span id=bill class="mut sml"></span></div>
-  <div class=kcard style=margin-top:10px>
-    <div class=mut style=margin-bottom:6px>Выдать новый ключ</div>
-    <div class=row>
-      <label class=fld><span>владелец</span><input id=newOwner placeholder="имя клиента"></label>
-      <label class=fld><span>квота units/мес (пусто=∞)</span><input id=newQuota type=number placeholder="∞"></label>
-      <label class=fld><span>лимит req/мин (пусто=∞)</span><input id=newRate type=number placeholder="∞"></label>
+<section id=keys class=tab hidden>
+  <div class=card>
+    <div class=hd><h3>🔑 Ключи и лимиты</h3><span id=bill class="mut sml"></span></div>
+    <div class=kcard style=margin-top:10px>
+      <div class=mut style=margin-bottom:6px>Выдать новый ключ</div>
+      <div class=row>
+        <label class=fld><span>владелец</span><input id=newOwner placeholder="имя клиента"></label>
+        <label class=fld><span>квота units/мес (пусто=∞)</span><input id=newQuota type=number placeholder="∞"></label>
+        <label class=fld><span>лимит req/мин (пусто=∞)</span><input id=newRate type=number placeholder="∞"></label>
+      </div>
+      <div class=acts><button class=p style=flex:1 onclick=createKey()>+ Выдать ключ</button></div>
+      <div id=keyout class=keyout></div>
     </div>
-    <div class=acts><button class=p style=flex:1 onclick=createKey()>+ Выдать ключ</button></div>
-    <div id=keyout class=keyout></div>
+    <div id=keys-list></div>
   </div>
-  <div id=keys></div>
-</div>
+</section>
 
+<section id=activity class=tab hidden>
+  <div class=card>
+    <div class=hd><h3>🕒 Последние операции</h3><span class="mut sml">кто · что · сколько</span></div>
+    <div id=recent style=margin-top:8px></div>
+  </div>
+</section>
+
+</main>
 <div id=toast></div>
 <script>
 const $=s=>document.querySelector(s);
 const BASE=location.pathname.replace(/\/admin\/ui\/?$/,'');
 let ADM=localStorage.getItem('gw_adm')||'';
+let TAB='overview';let RLIMIT=20;let UTILH=[];
 const esc=s=>(s||'').toString().replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/"/g,'&quot;');
-function toast(m){const t=$('#toast');t.textContent=m;t.classList.add('show');clearTimeout(t._h);t._h=setTimeout(()=>t.classList.remove('show'),2600);}
-function setConn(ok){$('#conn').innerHTML='<span class="dot'+(ok?' on':'')+'"></span>'+(ok?'подключено':'не подключено');if(ok)$('#loginCard').style.display='none';}
-$('#adm').value=ADM;
-function saveAdm(){ADM=$('#adm').value.trim();localStorage.setItem('gw_adm',ADM);refresh(true);}
+function toast(m){const t=$('#toast');t.textContent=m;t.classList.add('show');clearTimeout(t._h);t._h=setTimeout(()=>t.classList.remove('show'),2800);}
+function setConn(ok){$('#conn').innerHTML='<span class="dot'+(ok?' on':'')+'"></span>'+(ok?'на связи':'нет связи');}
+function copy(t){navigator.clipboard.writeText(t).then(()=>toast('Скопировано'));}
+function ago(ts){if(!ts)return '—';let d=Math.floor(Date.now()/1000-ts);if(d<0)d=0;if(d<60)return d+'с';if(d<3600)return Math.floor(d/60)+'м';if(d<86400)return Math.floor(d/3600)+'ч';return Math.floor(d/86400)+'д';}
 async function api(path,opts={}){opts.headers=Object.assign({'X-Admin-Key':ADM},opts.headers||{});
   const r=await fetch(BASE+path,opts);
-  if(r.status===403){setConn(false);$('#loginCard').style.display='';$('#admst').textContent='403 — неверный admin-ключ';throw 0;}
+  if(r.status===403){setConn(false);throw 0;}
   return r;}
-function ago(ts){if(!ts)return '—';let d=Math.floor(Date.now()/1000-ts);if(d<60)return d+'с назад';if(d<3600)return Math.floor(d/60)+'м назад';return Math.floor(d/3600)+'ч назад';}
-function copy(t){navigator.clipboard.writeText(t).then(()=>toast('Скопировано'));}
 
+// ---- navigation ----
+document.querySelectorAll('#nav button').forEach(b=>b.onclick=()=>setTab(b.dataset.tab));
+function setTab(name){TAB=name;
+  document.querySelectorAll('#nav button').forEach(b=>b.classList.toggle('on',b.dataset.tab===name));
+  document.querySelectorAll('.tab').forEach(s=>s.hidden=(s.id!==name));
+  load();}
+
+// ---- icons ----
 const SVC_ICON={translate:'🌐',llm:'🤖','3d-проект':'🏗️',render:'🎨','голос':'🎙️',voice_translate:'🎙️',voice_chunk:'🎙️','аватар':'🖼️',avatar:'🖼️','дубляж':'🎥',dub:'🎥',project_3d:'🏗️',reference:'🖼️',interior:'🏠',furnish:'🛋️'};
-function svcIco(s){return SVC_ICON[s]||'•';}
-let UTILH=[];let SVRDELTA=0;let RLIMIT=20;
-function moreRecent(){RLIMIT=Math.min(200,RLIMIT+20);loadLoad();}
-function agoS(ts){let d=Math.floor(Date.now()/1000+SVRDELTA-ts);if(d<0)d=0;if(d<60)return d+'с';if(d<3600)return Math.floor(d/60)+'м';if(d<86400)return Math.floor(d/3600)+'ч';return Math.floor(d/86400)+'д';}
-function drawSpark(){const c=$('#spark');if(!c)return;const w=c.clientWidth||300,h=44;c.width=w;c.height=h;const x=c.getContext('2d');x.clearRect(0,0,w,h);
+const svcIco=s=>SVC_ICON[s]||'•';
+
+// ---- sparkline ----
+function drawSpark(){const c=$('#spark');if(!c||c.offsetParent===null)return;const w=c.clientWidth||300,h=46;c.width=w;c.height=h;const x=c.getContext('2d');x.clearRect(0,0,w,h);
   if(UTILH.length<2)return;const n=UTILH.length,step=w/Math.max(59,n-1);
-  x.beginPath();x.moveTo(0,h-(UTILH[0]/100)*h);for(let i=1;i<n;i++)x.lineTo(i*step,h-(UTILH[i]/100*(h-3))-1);
+  x.beginPath();x.moveTo(0,h-(UTILH[0]/100*(h-3))-1);for(let i=1;i<n;i++)x.lineTo(i*step,h-(UTILH[i]/100*(h-3))-1);
   x.lineTo((n-1)*step,h);x.lineTo(0,h);x.closePath();const g=x.createLinearGradient(0,0,0,h);g.addColorStop(0,'rgba(79,140,255,.35)');g.addColorStop(1,'rgba(79,140,255,.02)');x.fillStyle=g;x.fill();
   x.beginPath();x.moveTo(0,h-(UTILH[0]/100*(h-3))-1);for(let i=1;i<n;i++)x.lineTo(i*step,h-(UTILH[i]/100*(h-3))-1);x.strokeStyle='#4f8cff';x.lineWidth=2;x.stroke();}
 
-async function loadLoad(){try{const s=await (await api('/admin/activity?limit='+RLIMIT)).json();setConn(true);
-  if(s.now)SVRDELTA=s.now-Math.floor(Date.now()/1000);
+// ---- OVERVIEW ----
+async function loadOverview(){let s;try{s=await(await api('/admin/activity?limit=8')).json();setConn(true);}catch(e){return;}
   const g=s.gpu||{},pct=g.vram_total?Math.round(g.vram_used/g.vram_total*100):0,util=g.util||0;
   UTILH.push(util);if(UTILH.length>60)UTILH.shift();drawSpark();
-  $('#gpu').innerHTML='<span class=badge>🧠 '+esc(s.model||'—')+'</span><span class=badge>util '+util+'%</span>'+
-    '<div style=flex:1;min-width:160px><div class=mut style=font-size:11px>VRAM '+(g.vram_used||0)+' / '+(g.vram_total||0)+' MiB ('+pct+'%)</div><div class=bar><i style=width:'+pct+'%></i></div></div>'+
-    (s.swapping?'<span class=badge style=color:var(--warn)>↻ своп: '+esc(s.swapping)+'</span>':'');
-  // RUNNING: broker GPU jobs + in-flight gateway requests (translate/llm/voice)
+  const brk=s.broker_up?'':'<span class=badge>брокер выкл</span>';
+  $('#gpu').innerHTML='<span class=badge>🧠 '+esc(s.model||'—')+'</span><span class=badge>util '+util+'%</span>'+brk+
+    '<div style=flex:1;min-width:170px><div class=mut style=font-size:11px>VRAM '+(g.vram_used||0)+' / '+(g.vram_total||0)+' MiB ('+pct+'%)</div><div class="bar'+(pct>=90?' hot':'')+'"><i style=width:'+pct+'%></i></div></div>';
   const run=s.running||[],fly=s.inflight||[];let html='';
   run.forEach(j=>{const p=j.est?Math.min(100,Math.round(j.elapsed/j.est*100)):0;
-    html+='<div class=kcard><div class=hd><b><span class="dot on" style=display:inline-block;margin-right:6px></span>'+svcIco(j.type)+' '+esc(j.type)+'</b><span class=mut>'+(j.elapsed||0)+'с / ~'+(j.est||0)+'с</span></div>'+(j.step?'<div class=mut style=margin-top:4px>'+esc(j.step)+'</div>':'')+'<div class=bar><i style=width:'+p+'%></i></div></div>';});
-  fly.forEach(f=>{html+='<div class=kcard><div class=hd><b><span class="dot on" style=display:inline-block;margin-right:6px></span>'+svcIco(f.service)+' '+esc(f.service)+'</b><span class=mut>'+f.elapsed+'с</span></div><div class=mut style=margin-top:4px>👤 '+esc(f.owner)+' · обрабатывается…</div></div>';});
+    html+='<div class=kcard><div class=hd><b><span class="dot run"></span> '+svcIco(j.type)+' '+esc(j.type)+'</b><span class=mut>'+(j.elapsed||0)+'с / ~'+(j.est||0)+'с</span></div>'+(j.step?'<div class=mut style=margin-top:4px>'+esc(j.step)+'</div>':'')+'<div class=bar><i style=width:'+p+'%></i></div></div>';});
+  fly.forEach(f=>{html+='<div class=kcard><div class=hd><b><span class="dot run"></span> '+svcIco(f.service)+' '+esc(f.service)+'</b><span class=mut>'+f.elapsed+'с</span></div><div class=mut style=margin-top:4px>👤 '+esc(f.owner)+' · обрабатывается…</div></div>';});
   $('#live').innerHTML=html||'<div class=mut>сейчас ничего не выполняется</div>';
   $('#ln').textContent=(run.length+fly.length)?('· '+(run.length+fly.length)):'';
-  // QUEUE: broker queued jobs
-  const q=s.queued||[];$('#qn').textContent=q.length?('· '+q.length+' в ожидании'):'';
+  const q=s.queued||[];$('#qn').textContent=q.length?('· '+q.length):'';
   $('#queue').innerHTML=q.length?q.map(j=>'<div class=kcard style=padding:9px_12px><div class=hd><span><span class=badge>#'+j.position+'</span> '+svcIco(j.type)+' '+esc(j.type)+'</span><span class=mut>~'+(j.eta||0)+'с</span></div></div>').join(''):'<div class=mut>очередь пуста</div>';
-  // RECENT completed feed
-  const r=s.recent||[];
-  $('#recent').innerHTML=(r.length?r.map(e=>'<div class=rrow><span class=rico>'+svcIco(e.service)+'</span><span class=rown>'+esc(e.owner)+'</span><span class=badge style=font-size:10px>'+esc(e.service)+'</span><span class=rmeta>'+e.units+' u'+(e.tokens?' · '+e.tokens+' tok':'')+'</span><span class=rago>'+agoS(e.ts)+'</span></div>').join(''):'<div class=mut>пока пусто</div>')+
-    (r.length>=RLIMIT?'<div class=acts style=margin-top:10px><button class=ghost style=flex:1 onclick=moreRecent()>↓ Показать больше</button></div>':'');
-}catch(e){}}
+  const sy=s.system||{};const dlow=(sy.disk_free_gb||99)<30;
+  $('#sys').innerHTML=
+    '<div class=stat><div class=mut>Диск свободно</div><b style="color:'+(dlow?'var(--bad)':'inherit')+'">'+(sy.disk_free_gb??'—')+' ГБ</b><div class=mut>из '+(sy.disk_total_gb??'—')+' ГБ</div></div>'+
+    '<div class=stat><div class=mut>RAM свободно</div><b>'+(sy.ram_avail_mb?Math.round(sy.ram_avail_mb/1024):'—')+' ГБ</b><div class=mut>из '+(sy.ram_total_mb?Math.round(sy.ram_total_mb/1024):'—')+' ГБ</div></div>'+
+    '<div class=stat><div class=mut>Модель в VRAM</div><b style=font-size:14px>'+esc((s.loaded&&s.loaded.name)||'—')+'</b><div class=mut>'+((s.loaded&&s.loaded.vram_mib)||0)+' MiB</div></div>'+
+    '<div class=stat><div class=mut>GPU util</div><b>'+util+'%</b></div>';
+}
 
-async function loadKeys(){try{const d=await (await api('/admin/keys')).json();setConn(true);
+// ---- SERVICES ----
+async function loadServices(){let d;try{d=await(await api('/admin/services')).json();setConn(true);}catch(e){return;}
+  const groups={};d.services.forEach(s=>{(groups[s.group]=groups[s.group]||[]).push(s);});
+  let html='';
+  for(const g in groups){html+='<div class=grp>'+esc(g)+'</div>';
+    groups[g].forEach(s=>{
+      const run=s.running,dotc=run?(s.health===false?'warn':'run'):(s.status==='absent'?'bad':'');
+      const stt=run?(s.health===false?'нет ответа':'работает'):(s.status==='exited'||s.status==='inactive'?'остановлен':esc(s.status));
+      html+='<div class=svc><span class="dot '+dotc+'"></span><span class=nm>'+esc(s.title)+'<div class="mut sml">'+esc(s.name)+' · '+stt+'</div></span>'+
+        '<span class=acts>'+
+        (run?'':'<button class="p sm" onclick="svc(\''+s.name+'\',\'start\')">Старт</button>')+
+        (run?'<button class="sm" onclick="svc(\''+s.name+'\',\'restart\')">Рестарт</button>':'')+
+        (run&&!s.self?'<button class="d sm" onclick="svc(\''+s.name+'\',\'stop\')">Стоп</button>':'')+
+        '</span></div>';
+    });}
+  $('#services-list').innerHTML=html;
+}
+async function svc(name,action){if(action==='stop'&&!confirm('Остановить '+name+'?'))return;
+  toast(name+': '+action+'…');
+  try{const r=await(await api('/admin/services/'+name+'/'+action,{method:'POST'})).json();
+    toast(name+' '+action+(r.ok?' ✓':' ✗'));}catch(e){toast('ошибка');}
+  setTimeout(loadServices,1500);}
+
+// ---- KEYS ----
+async function loadKeys(){let d;try{d=await(await api('/admin/keys')).json();setConn(true);}catch(e){return;}
   $('#bill').textContent='тариф '+d.price_per_unit+' '+d.currency+'/unit · '+d.month;
   let total=0,mtotal=0;
-  $('#keys').innerHTML=d.keys.map(k=>{total+=k.cost;mtotal+=k.month_cost;
+  $('#keys-list').innerHTML=d.keys.map(k=>{total+=k.cost;mtotal+=k.month_cost;
     const used=k.quota_units?Math.min(100,Math.round(k.month_units/k.quota_units*100)):0,hot=used>=85?' hot':'';
     const svc=Object.entries(k.by_service||{}).map(([s,n])=>'<span class=badge style=font-size:10px>'+esc(s)+' '+n+'</span>').join(' ');
     return '<div class="kcard'+(k.active?'':' off')+'" id="c_'+k.full_key+'">'+
       '<div class=hd><div><b>'+esc(k.owner)+'</b><div class="mono mut" onclick="copy(\''+k.full_key+'\')" style=cursor:pointer title="копировать">'+esc(k.key)+' ⧉</div></div>'+
         '<div class=sw><input type=checkbox id="a_'+k.full_key+'" '+(k.active?'checked':'')+'><label for="a_'+k.full_key+'"></label></div></div>'+
-      '<div class=grid2 style=margin-top:10px>'+
-        '<div class=stat><div class=mut>За месяц</div><b>'+k.month_units+(k.quota_units?' / '+k.quota_units:'')+'</b> units'+(k.quota_units?'<div class="bar q'+hot+'"><i style=width:'+used+'%></i></div>':'')+'</div>'+
+      '<div class=grid style=margin-top:10px>'+
+        '<div class=stat><div class=mut>За месяц</div><b>'+k.month_units+(k.quota_units?' / '+k.quota_units:'')+'</b> units'+(k.quota_units?'<div class="bar'+hot+'"><i style=width:'+used+'%></i></div>':'')+'</div>'+
         '<div class=stat><div class=mut>Счёт (всего)</div><b>'+k.cost+' '+d.currency+'</b><div class=mut>'+k.units+' units · '+ago(k.last_ts)+'</div></div>'+
       '</div>'+
       (svc?'<div style=margin-top:8px>'+svc+'</div>':'')+
@@ -1026,10 +1222,8 @@ async function loadKeys(){try{const d=await (await api('/admin/keys')).json();se
         '<button class=d onclick="revoke(\''+k.full_key+'\')">⨯ Отозвать</button></div>'+
     '</div>';}).join('')+
     '<div class=mut style=margin-top:12px>Итог: всего <b>'+total.toFixed(2)+' '+d.currency+'</b> · за месяц <b>'+mtotal.toFixed(2)+' '+d.currency+'</b></div>';
-  // wire active toggles -> instant apply
   d.keys.forEach(k=>{const el=$('#a_'+CSS.escape(k.full_key));if(el)el.onchange=()=>saveLim(k.full_key,true);});
-}catch(e){}}
-
+}
 async function saveLim(key,silent){const c=$('#c_'+CSS.escape(key));
   const q=c.querySelector('.q_quota').value,r=c.querySelector('.q_rate').value,a=$('#a_'+CSS.escape(key)).checked?'true':'false';
   const fd=new FormData();fd.append('quota_units',q);fd.append('rate_per_min',r);fd.append('active',a);
@@ -1039,14 +1233,23 @@ async function revoke(key){if(!confirm('Отозвать ключ? Доступ 
   await api('/admin/keys/'+encodeURIComponent(key)+'/revoke',{method:'POST'});toast('Ключ отозван');loadKeys();}
 async function createKey(){const o=$('#newOwner').value.trim();if(!o){toast('Введи владельца');return;}
   const fd=new FormData();fd.append('owner',o);fd.append('quota_units',$('#newQuota').value);fd.append('rate_per_min',$('#newRate').value);
-  const d=await (await api('/admin/keys',{method:'POST',body:fd})).json();
+  const d=await(await api('/admin/keys',{method:'POST',body:fd})).json();
   const box=$('#keyout');box.style.display='block';
   box.innerHTML='Ключ для <b>'+esc(o)+'</b> (показывается один раз):<div class="mono" style=margin-top:6px;word-break:break-all>'+d.api_key+'</div><button class=p style=margin-top:8px onclick="copy(\''+d.api_key+'\')">⧉ Скопировать</button>';
   $('#newOwner').value='';$('#newQuota').value='';$('#newRate').value='';toast('Ключ выдан ✓');loadKeys();}
 
-function refresh(login){loadLoad();loadKeys();if(login)toast('Подключено');}
-setInterval(loadLoad,2500);
-setInterval(loadKeys,9000);
+// ---- ACTIVITY ----
+async function loadActivity(){let s;try{s=await(await api('/admin/activity?limit='+RLIMIT)).json();setConn(true);}catch(e){return;}
+  const r=s.recent||[];
+  $('#recent').innerHTML=(r.length?r.map(e=>'<div class=rrow><span class=rico>'+svcIco(e.service)+'</span><span class=rown>'+esc(e.owner)+'</span><span class=badge style=font-size:10px>'+esc(e.service)+'</span><span class=rmeta>'+e.units+' u'+(e.tokens?' · '+e.tokens+' tok':'')+'</span><span class=rago>'+ago(e.ts)+'</span></div>').join(''):'<div class=mut>пока пусто</div>')+
+    (r.length>=RLIMIT?'<div class=acts style=margin-top:10px><button class=ghost style=flex:1 onclick=moreRecent()>↓ Показать больше</button></div>':'');
+}
+function moreRecent(){RLIMIT=Math.min(200,RLIMIT+20);loadActivity();}
+
+// ---- dispatcher ----
+function load(){if(TAB==='overview')loadOverview();else if(TAB==='services')loadServices();else if(TAB==='keys')loadKeys();else if(TAB==='activity')loadActivity();}
+setInterval(()=>{if(TAB==='overview')loadOverview();else if(TAB==='services')loadServices();else if(TAB==='activity')loadActivity();},3000);
+setInterval(()=>{if(TAB==='keys')loadKeys();},9000);
 setInterval(()=>$('#clock').textContent=new Date().toLocaleTimeString(),1000);
-refresh();
+load();
 </script></body></html>"""
