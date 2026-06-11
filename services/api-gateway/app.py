@@ -501,7 +501,7 @@ def _gen(model, prompt, options=None, timeout=200):
     is what stops concurrent bursts from piling up into hung sessions (2026-06-11 incident)."""
     # keep_alive=-1 pins the model in VRAM indefinitely (box is dedicated to translation now,
     # so we never want the ~68s cold reload after an idle gap).
-    body = {"model": model, "prompt": prompt, "stream": False, "keep_alive": -1,
+    body = {"model": model, "prompt": prompt, "stream": False, "keep_alive": "5m",
             "options": options or {"temperature": 0.2}}
     if model not in BROKER_LLM:
         r = httpx.post(f"{OLLAMA}/api/generate", json=body, timeout=timeout)

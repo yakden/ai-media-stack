@@ -39,7 +39,11 @@ FLOORPLAN_URL = "http://127.0.0.1:8204"
 CUBI_URL = "http://127.0.0.1:8205"        # CubiCasa5k neural parser (CPU)
 OLLAMA = "http://127.0.0.1:11434"
 VLM_MODEL = "qwen2.5vl:7b"
-DUTY = ["whisper-xtts-server", "avatar-muse"]   # default resident models (STT/TTS, avatar)
+# whisper (STT/TTS) is the default resident — at NUM_PARALLEL=2 the translation model EuroLLM
+# (~9 GB) coexists with whisper (~6 GB) on the 16 GB T4, so translation + voice both work by
+# default. avatar/render/vlm are heavy and run on demand via a swap (see TRANSLATE_MODEL stop).
+DUTY = ["whisper-xtts-server"]                  # default resident (STT/TTS); avatar = on demand
+TRANSLATE_MODEL = "eurollm:9b"                   # resident translation model (loaded by the gateway)
 # heavy translation LLMs that need the WHOLE GPU — run via /api/llm, which swaps everything
 # else off (whisper/avatar/render/vlm) so the model loads fully on the T4 (no CPU offload).
 HEAVY_LLM_MODELS = ["translategemma:12b"]
@@ -174,6 +178,9 @@ def _swap_to(target):
         if target != "llm":                       # leaving LLM mode -> unload the heavy model
             for _m in HEAVY_LLM_MODELS:
                 _sh(["sudo", "docker", "exec", "ollama", "ollama", "stop", _m], 30)
+        if target in ("vlm", "render", "llm"):    # heavy GPU job needs the room -> unload the
+            _sh(["sudo", "docker", "exec", "ollama", "ollama", "stop", TRANSLATE_MODEL], 30)
+            # resident translation model; it reloads on the next translate request once free.
         if target == "render":
             _sh(["sudo", "docker", "compose", "-f", RENDER_COMPOSE, "up", "-d"])
             for _ in range(120):
