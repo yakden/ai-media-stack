@@ -277,12 +277,12 @@ class Segmenter:
             # AAC is universally mp4-compatible and dirt cheap to encode.
             # 0:a? makes the audio map optional so cameras without audio still run.
             "-map", "0:v:0",
-            "-map", "0:a?",
             "-c:v", "copy",
-            "-c:a", "aac",
-            "-b:a", "128k",
-            "-ar", "44100",
-            "-ac", "1",
+            # NO audio. Transcoding camera audio (often G.711 with broken timestamps) to
+            # AAC backed up the encoder queue ("Non-monotonous DTS in stream 0:1") and
+            # periodically HUNG the segment muxer — clips/thumbnails silently stopped.
+            # Surveillance event clips are video-only; this makes the buffer rock-solid.
+            "-an",
             # Rolling segments. reset_timestamps keeps each segment independently
             # playable; strftime drives the wall-clock filenames.
             "-f", "segment",
@@ -337,6 +337,15 @@ class Segmenter:
         except Exception:  # pragma: no cover - best-effort cleanup
             logger.exception("camera %s error terminating ffmpeg", self.camera_id)
 
+    def _newest_segment_mtime(self) -> float:
+        """Newest segment file mtime — advances while ffmpeg writes; frozen if it stalls.
+        Robust to pruning (pruning removes OLD files, never the newest)."""
+        try:
+            return max((p.stat().st_mtime for p in self.segments_dir.glob("seg_*.mp4")),
+                       default=0.0)
+        except Exception:
+            return 0.0
+
     def _run(self) -> None:
         """Watchdog loop: keep ffmpeg alive, prune old segments, until stopped."""
         backoff = self.restart_backoff
@@ -360,11 +369,28 @@ class Segmenter:
                 self._proc = proc
             backoff = self.restart_backoff  # reset on a successful spawn
 
-            # Supervise: poll for exit, prune periodically.
+            # Supervise: poll for exit, prune periodically, AND detect a HUNG ffmpeg
+            # — one that is alive (poll() is None) but produces no segments (RTSP
+            # stalled mid-handshake / mangled timestamps). The old watchdog only
+            # restarted on process *death*, so a hung ffmpeg could sit for hours
+            # writing nothing → no clips, no thumbnails. We now also restart on stall.
+            stall_timeout = max(20.0, self.segment_seconds * 6)
+            last_progress = time.monotonic()
+            last_mtime = self._newest_segment_mtime()
             while not self._stop_evt.is_set():
                 if proc.poll() is not None:
                     break
                 self._maybe_prune()
+                mtime = self._newest_segment_mtime()
+                if mtime > last_mtime:
+                    last_mtime = mtime
+                    last_progress = time.monotonic()
+                elif time.monotonic() - last_progress > stall_timeout:
+                    logger.warning(
+                        "camera %s: ffmpeg segmenter produced no new segment in %.0fs "
+                        "(stalled); killing it to restart", self.camera_id, stall_timeout)
+                    self._terminate_proc()
+                    break
                 if self._stop_evt.wait(1.0):
                     break
 

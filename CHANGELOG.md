@@ -4,6 +4,14 @@ All notable changes to this project are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/), and this project
 adheres to [Semantic Versioning](https://semver.org/).
 
+## [1.1.1] — 2026-06-11
+
+### Fixed
+- **VMS clips & thumbnails** now record reliably. The per-camera ffmpeg segment buffer could **hang**
+  (alive but writing nothing) — so events were logged but had no clip/thumbnail. Two fixes: the
+  segmenter watchdog now restarts a **stalled** ffmpeg (not only a dead one), and the warm buffer is
+  **video-only** (`-an`) — transcoding camera audio backed up the muxer and was the stall's root cause.
+
 ## [1.1.0] — 2026-06-11
 
 ### Added
