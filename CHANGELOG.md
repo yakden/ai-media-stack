@@ -4,6 +4,17 @@ All notable changes to this project are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/), and this project
 adheres to [Semantic Versioning](https://semver.org/).
 
+## [1.3.5] — 2026-06-12
+
+### Fixed
+- **Static assets are now cache-busted** (`?v=` query on every CSS/JS link). Browsers were serving
+  stale cached stylesheets, so the responsive redesign from 1.3.4 did not appear on already-visited
+  clients without a hard refresh. New loads now always pick up the latest UI.
+
+### Changed
+- **Larger desktop preview thumbnails** — events `320→380`, identities `240→280`, People `190→220`,
+  clip grid `200→240` px minimum tile width, with roomier gaps, for easier at-a-glance reviewing.
+
 ## [1.3.4] — 2026-06-12
 
 ### Changed

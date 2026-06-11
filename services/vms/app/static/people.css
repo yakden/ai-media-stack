@@ -26,7 +26,7 @@
 .ppl-controls input, .ppl-controls select { background: #0b0e13; border: 1px solid #2a323d; color: #e6edf3; padding: 9px 11px; border-radius: 10px; font-size: 14px; }
 .ppl-controls input[type=search] { flex: 1; min-width: 160px; }
 
-.ppl-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(190px, 1fr)); gap: 14px; }
+.ppl-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(220px, 1fr)); gap: 16px; }
 .ppl-pcard { background: #161b22; border: 1px solid #2a323d; border-radius: 14px; overflow: hidden; cursor: pointer; transition: .12s; }
 .ppl-pcard:hover { border-color: #4f8cff; transform: translateY(-2px); }
 .ppl-face { width: 100%; aspect-ratio: 1/1; object-fit: cover; background: #0b0e13; display: block; }
