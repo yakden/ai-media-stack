@@ -105,6 +105,7 @@ class SightingFeature:
     object_class: str = "person"  # COCO label this detection belongs to
     face_bbox: Optional[tuple] = None  # (x1,y1,x2,y2) of the assigned face, frame coords
     face_quality: float = 0.0  # det_score * frontalness (pose-aware face quality)
+    face_pose: float = 0.0  # signed yaw ~[-0.5,0.5]; 0≈frontal (multi-view gallery)
     color_name: str = "unknown"   # dominant colour ("red", "brown", "gray"…)
     color_hex: str = "#000000"
     color_hist: Optional[np.ndarray] = None  # 12-bin hue histogram
@@ -178,6 +179,25 @@ def frontalness(kps) -> float:
         return float(max(0.0, min(1.0, 1.0 - 2.0 * abs(ratio - 0.5))))
     except Exception:
         return 1.0
+
+
+def face_pose(kps) -> float:
+    """SIGNED yaw in ~[-0.5, 0.5] from the 5 landmarks: 0 ≈ frontal, negative and
+    positive = head turned to each side. Used to bucket face exemplars by pose so
+    the gallery covers frontal + both profiles (angle-invariant matching). 0.0 when
+    landmarks are unavailable."""
+    try:
+        import numpy as _np
+        k = _np.asarray(kps, dtype=_np.float32).reshape(-1, 2)
+        if k.shape[0] < 5:
+            return 0.0
+        le, re, nose = k[0], k[1], k[2]
+        span = float(re[0] - le[0])
+        if abs(span) < 1e-3:
+            return 0.0
+        return float(max(-0.5, min(0.5, (float(nose[0]) - float(le[0])) / span - 0.5)))
+    except Exception:
+        return 0.0
 
 
 def _aspect_ok(box: BBox, min_aspect: float = 1.1) -> bool:
@@ -268,11 +288,13 @@ class IdentityPipeline:
                     continue
                 emb = np.asarray(f.embedding, dtype=np.float32).reshape(-1)
                 ds = float(getattr(f, "det_score", 0.0))
-                fq = ds * frontalness(getattr(f, "kps", None))  # quality incl. pose
+                kps = getattr(f, "kps", None)
+                fq = ds * frontalness(kps)  # quality incl. pose
+                pose = face_pose(kps)        # signed yaw for the multi-view gallery
                 # Keep the highest-QUALITY (score x frontalness) face per box.
                 prev = face_for_box.get(best_i)
                 if prev is None or fq > prev[3]:
-                    face_for_box[best_i] = (emb, ds, (int(fx1), int(fy1), int(fx2), int(fy2)), fq)
+                    face_for_box[best_i] = (emb, ds, (int(fx1), int(fy1), int(fx2), int(fy2)), fq, pose)
 
         # 2. Per box: appearance embedding + attach assigned face.
         out: list[SightingFeature] = []
@@ -308,6 +330,7 @@ class IdentityPipeline:
             face_score = face_entry[1] if face_entry else 0.0
             face_bbox = face_entry[2] if face_entry and len(face_entry) > 2 else None
             face_quality = face_entry[3] if face_entry and len(face_entry) > 3 else face_score
+            face_pose_v = face_entry[5] if face_entry and len(face_entry) > 5 else 0.0
 
             out.append(
                 SightingFeature(
@@ -321,6 +344,7 @@ class IdentityPipeline:
                     object_class=box_classes[i],
                     face_bbox=face_bbox,
                     face_quality=face_quality,
+                    face_pose=face_pose_v,
                     color_name=color_name,
                     color_hex=color_hex,
                     color_hist=color_hist,

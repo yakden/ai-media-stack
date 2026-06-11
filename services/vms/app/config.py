@@ -129,7 +129,7 @@ class Settings(BaseSettings):
     # face template — a cheap pose/quality gate (drops profiles/blur).
     face_pose_min: float = 0.3
     # Per-identity exemplar caps.
-    reid_max_face_exemplars: int = 8
+    reid_max_face_exemplars: int = 12  # multi-view gallery: frontal + L/R profiles
     reid_max_app_exemplars: int = 16
     # Anti-explosion: cap new-identity creation per camera per minute.
     reid_new_identity_rate_per_min: int = 30

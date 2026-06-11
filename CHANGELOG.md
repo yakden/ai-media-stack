@@ -4,6 +4,16 @@ All notable changes to this project are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/), and this project
 adheres to [Semantic Versioning](https://semver.org/).
 
+## [1.3.2] — 2026-06-11
+
+### Changed
+- **Multi-view (pose-diverse) face gallery** for angle-invariant recognition. The 5 facial landmarks
+  now yield a signed yaw; face exemplars are bucketed frontal / left / right and kept pose-diverse
+  (cap 8→12, pose-aware eviction). The old acceptance band rejected low-cosine faces — i.e. profiles —
+  so the gallery stayed frontal-only and a turned head never matched. Now a profile view of a tracked
+  person is KEPT as an exemplar, so the same person is matched from any angle (a profile query hits the
+  stored profile exemplar). New `face_exemplars.pose` column (idempotent migration).
+
 ## [1.3.1] — 2026-06-11
 
 ### Changed

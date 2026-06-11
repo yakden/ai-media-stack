@@ -31,6 +31,20 @@ from .pipeline import SightingFeature
 logger = logging.getLogger(__name__)
 
 
+def _face_pose_bucket(pose) -> int:
+    """Bucket a signed yaw into -1 (turned one way) / 0 (frontal) / +1 (other way).
+    Drives the pose-diverse face gallery so a profile query matches a profile exemplar."""
+    try:
+        p = float(pose or 0.0)
+    except Exception:
+        return 0
+    if p <= -0.12:
+        return -1
+    if p >= 0.12:
+        return 1
+    return 0
+
+
 @dataclass
 class MatchConfig:
     """All matching thresholds / windows / caps (defaults from the architecture,
@@ -53,7 +67,7 @@ class MatchConfig:
     # quality+decay-weighted query vector before matching (off => per-frame vec).
     app_temporal_fusion: bool = False
     # Exemplar caps.
-    max_face_exemplars: int = 8
+    max_face_exemplars: int = 12  # room for frontal + left + right views per person
     max_app_exemplars: int = 16
     # Face-exemplar "useful but not redundant" acceptance band.
     face_exemplar_lo: float = 0.45
@@ -532,13 +546,13 @@ class IdentityManager:
     ) -> None:
         if feature.face_vec is None or not feature.has_face:
             return
-        if feature.face_det_score < self.cfg.face_match * 0:  # always pass det
-            pass
-        # Useful-but-not-redundant band: a brand-new identity (no exemplars
-        # yet, face_score None) always seeds its first face exemplar.
-        if face_score is not None and not (
-            self.cfg.face_exemplar_lo <= face_score <= self.cfg.face_exemplar_hi
-        ):
+        pose = float(getattr(feature, "face_pose", 0.0) or 0.0)
+        # MULTI-VIEW GALLERY: only skip a TRUE near-duplicate (very high cosine to
+        # an existing exemplar). A LOW-cosine face is a NEW pose/profile of the same
+        # tracked person — keep it, that is exactly how the gallery gains the left/
+        # right views needed to match this person from any angle later. (The old
+        # lower-band gate rejected profiles, so the gallery stayed frontal-only.)
+        if face_score is not None and face_score > self.cfg.face_exemplar_hi:
             return
 
         from app.db.models import FaceExemplar  # noqa: WPS433
@@ -546,13 +560,18 @@ class IdentityManager:
         vec = normalize(feature.face_vec)
         existing = list(identity.face_exemplars)
         if len(existing) >= self.cfg.max_face_exemplars:
-            # Evict the lowest-quality (lowest det_score) exemplar.
-            victim = min(existing, key=lambda e: (e.det_score or 0.0))
-            session.delete(victim)
+            # Pose-aware eviction: drop from the MOST-represented pose bucket (never
+            # starve frontal/left/right coverage), lowest det_score within it.
+            from collections import Counter
+            counts = Counter(_face_pose_bucket(getattr(e, "pose", 0.0)) for e in existing)
+            over = max(counts, key=lambda b: counts[b])
+            pool = [e for e in existing if _face_pose_bucket(getattr(e, "pose", 0.0)) == over]
+            session.delete(min(pool, key=lambda e: (e.det_score or 0.0)))
         ex = FaceExemplar(
             identity_id=identity.id,
             vector=serialize_vector(vec),
             det_score=float(feature.face_det_score),
+            pose=pose,
             camera_id=camera_id,
             sighting_id=sighting_id,
         )

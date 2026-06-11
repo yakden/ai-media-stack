@@ -388,6 +388,9 @@ class FaceExemplar(Base):
     )
     vector: Mapped[bytes] = mapped_column(LargeBinary, nullable=False)
     det_score: Mapped[float] = mapped_column(Float, nullable=False, default=0.0)
+    # Signed yaw from the 5 landmarks (~0 frontal, <0 / >0 = turned each way) —
+    # used to keep a pose-diverse (frontal/left/right) face gallery per identity.
+    pose: Mapped[float | None] = mapped_column(Float, nullable=True)
     camera_id: Mapped[int | None] = mapped_column(Integer, nullable=True)
     sighting_id: Mapped[int | None] = mapped_column(
         ForeignKey("sightings.id", ondelete="SET NULL"),

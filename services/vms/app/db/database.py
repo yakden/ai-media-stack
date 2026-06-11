@@ -103,6 +103,7 @@ def init_db(settings: Settings | None = None) -> None:
     ensure_camera_schema(engine)
     ensure_identity_object_schema(engine)
     ensure_event_track_schema(engine)
+    ensure_face_pose_schema(engine)
 
     logger.info("DB initialised (tables created if absent) at %s", settings.db_path)
 
@@ -136,6 +137,21 @@ def ensure_reid_schema(engine: Engine) -> None:
                     f"ALTER TABLE events ADD COLUMN {col} {col_type}"
                 )
                 logger.info("Added events.%s column (ReID schema)", col)
+
+
+def ensure_face_pose_schema(engine: Engine) -> None:
+    """Add ``face_exemplars.pose`` (signed yaw from the 5 landmarks) idempotently.
+    Enables the multi-view face gallery: keep frontal + left + right exemplars per
+    person so a profile query matches a profile exemplar (angle-invariant matching).
+    """
+    with engine.begin() as conn:
+        existing = {
+            row[1]
+            for row in conn.exec_driver_sql("PRAGMA table_info(face_exemplars)").fetchall()
+        }
+        if existing and "pose" not in existing:
+            conn.exec_driver_sql("ALTER TABLE face_exemplars ADD COLUMN pose FLOAT")
+            logger.info("Added face_exemplars.pose column (multi-view face gallery)")
 
 
 def ensure_event_track_schema(engine: Engine) -> None:
