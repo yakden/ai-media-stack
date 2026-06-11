@@ -4,6 +4,14 @@ All notable changes to this project are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/), and this project
 adheres to [Semantic Versioning](https://semver.org/).
 
+## [1.3.3] — 2026-06-12
+
+### Changed
+- **Camera-only face-quality floor.** Since identities are built purely from camera detections
+  (no photo enrollment), only DECENT faces (det_score × frontalness ≥ threshold) now register a
+  person and become exemplars — blurry / tiny / extreme-profile faces are dropped instead of
+  polluting the gallery with garbage embeddings. New `reid_face_exemplar_min_quality` (default 0.35).
+
 ## [1.3.2] — 2026-06-11
 
 ### Changed

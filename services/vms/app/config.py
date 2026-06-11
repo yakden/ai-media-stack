@@ -145,6 +145,9 @@ class Settings(BaseSettings):
     reid_min_app_box_area_frac: float = 0.01
     # Require a quality crop to CREATE a new identity (drop blurry singletons).
     reid_require_quality_for_new: bool = True
+    # Camera-only: minimum face quality (det_score × frontalness) for a face to
+    # register a person / become an exemplar. Filters blurry/tiny/profile garbage.
+    reid_face_exemplar_min_quality: float = 0.35
     # Identity is anchored on the FACE: a faceless person (back/side view) never
     # spawns a NEW identity — it only attaches to an existing one by appearance
     # within a session, else is dropped. THE fix for back-view duplicate explosion.

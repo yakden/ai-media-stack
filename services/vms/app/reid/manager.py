@@ -80,6 +80,10 @@ class MatchConfig:
     min_app_box_area_frac: float = 0.01
     min_crop_quality_for_new: float = 0.10
     require_quality_for_new: bool = True
+    # Camera-only mode: only DECENT faces (det_score × frontalness) register a person
+    # and become exemplars — blurry/tiny/extreme-profile faces are garbage that would
+    # pollute the identity. Raise to be stricter, lower to register more (less precise).
+    face_exemplar_min_quality: float = 0.35
     # Identity is anchored on the FACE/head (the only cross-clothing/cross-angle/
     # cross-day signal). A faceless person crop (a back/side view) must NOT spawn a
     # new person — it can only attach to an existing identity by appearance within a
@@ -341,13 +345,18 @@ class IdentityManager:
     # -- new-identity creation ------------------------------------------------
 
     def _quality_ok_for_new(self, feature: SightingFeature) -> bool:
-        # A usable face always qualifies (faces are strong, rare evidence) — and for
-        # PERSON it is REQUIRED to register a new identity (face = the identity anchor).
-        if feature.has_face and feature.face_vec is not None:
+        # A DECENT face qualifies (faces are the strong, rare evidence) — and for
+        # PERSON a good face is REQUIRED to register a new identity (face = anchor).
+        good_face = (
+            feature.has_face and feature.face_vec is not None
+            and float(getattr(feature, "face_quality", 0.0) or 0.0)
+            >= self.cfg.face_exemplar_min_quality
+        )
+        if good_face:
             return True
         obj_class = feature.object_class or "person"
         if obj_class == "person" and self.cfg.require_face_for_new_person:
-            return False  # faceless back/side view -> never a new person
+            return False  # faceless / poor-quality view -> never a new person
         if not self.cfg.require_quality_for_new:
             return True
         if feature.appearance_vec is None:
@@ -545,6 +554,9 @@ class IdentityManager:
         camera_id: int, sighting_id: int, face_score: Optional[float],
     ) -> None:
         if feature.face_vec is None or not feature.has_face:
+            return
+        # Camera-only quality floor: only store DECENT faces as exemplars.
+        if float(getattr(feature, "face_quality", 0.0) or 0.0) < self.cfg.face_exemplar_min_quality:
             return
         pose = float(getattr(feature, "face_pose", 0.0) or 0.0)
         # MULTI-VIEW GALLERY: only skip a TRUE near-duplicate (very high cosine to

@@ -395,6 +395,9 @@ class WorkerManager:
             "reid_require_face_for_new_person": bool(
                 getattr(s, "reid_require_face_for_new_person", True)
             ),
+            "reid_face_exemplar_min_quality": float(
+                getattr(s, "reid_face_exemplar_min_quality", 0.35)
+            ),
             "reid_gallery_reload_seconds": int(
                 getattr(s, "reid_gallery_reload_seconds", 30)
             ),
