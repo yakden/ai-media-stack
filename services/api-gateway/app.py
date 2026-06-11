@@ -33,7 +33,7 @@ LLM_MODELS = {"llama3.2:3b": "fast text LLM (translate/chat)",
               "translategemma:12b": "TranslateGemma-12B — Google translation model, highest quality (Q6_K)"}
 DEFAULT_LLM = "llama3.2:3b"
 # models best suited for translation, surfaced first in the UI picker
-TRANSLATE_MODELS = ["translategemma:12b", "eurollm:9b", "qwen2.5vl:7b", "llama3.2:3b"]
+TRANSLATE_MODELS = ["eurollm:9b", "translategemma:12b", "qwen2.5vl:7b", "llama3.2:3b"]
 DATA = "/opt/api-gateway"
 KEYS_F = os.path.join(DATA, "keys.json")
 USAGE_F = os.path.join(DATA, "usage.json")
