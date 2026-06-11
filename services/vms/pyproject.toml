@@ -1,0 +1,60 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "vms"
+version = "0.1.0"
+description = "MVP Video Management System — RTSP person detection, event-triggered recording, and ArcFace face recognition on a single NVIDIA T4"
+readme = "README.md"
+license = { text = "MIT" }
+authors = [{ name = "yakden", email = "yakden@gmail.com" }]
+requires-python = ">=3.10"
+dependencies = [
+    # --- Web framework ---
+    "fastapi>=0.110",
+    "uvicorn[standard]>=0.29",
+    "python-multipart>=0.0.9",   # multipart form uploads (face photos)
+    "pydantic>=2.6",
+    "pydantic-settings>=2.2",
+
+    # --- Persistence ---
+    "SQLAlchemy>=2.0",           # 2.x ORM over SQLite (WAL)
+
+    # --- Numerics / imaging ---
+    "numpy>=1.24,<2",            # insightface / faiss are happiest on numpy 1.x
+    "opencv-python-headless>=4.9",  # RTSP read + frame encode (no GUI libs in container)
+    "Pillow>=10.0",
+
+    # --- Detection (YOLOv8n ONNX) + appearance Re-ID (OSNet ONNX) ---
+    # onnxruntime-gpu provides the CUDAExecutionProvider; it transparently
+    # falls back to CPUExecutionProvider when the GPU is contended / forced off.
+    # The OSNet appearance Re-ID model (osnet_x0_25_msmt17.onnx) used for
+    # automatic cross-camera identification is a runtime *model asset* fetched
+    # by scripts/download_models.py — it needs no extra Python dependency here.
+    # torch/torchreid are required only OFFLINE at export time (see
+    # scripts/export_reid_onnx.py); they never ship in the runtime image.
+    "onnxruntime-gpu>=1.17",
+
+    # --- Face recognition ---
+    # insightface ships the SCRFD detector + ArcFace r50 (buffalo_l pack) and
+    # runs them under onnxruntime. faiss-cpu keeps the (small) index off the GPU.
+    "insightface>=0.7.3",
+    "faiss-cpu>=1.8.0",
+    "scikit-image>=0.21",        # insightface dependency (face alignment)
+
+    # --- Misc ---
+    "requests>=2.31",            # model download script + optional DeepStream client
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.0",
+    "httpx>=0.27",               # FastAPI TestClient
+]
+
+[project.urls]
+Homepage = "https://github.com/yakden/whisper-xtts-server"
+
+[tool.setuptools.packages.find]
+include = ["app*"]

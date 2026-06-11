@@ -1,0 +1,47 @@
+# OPTIONAL high-throughput detection backend.
+#
+# The default MVP does NOT use this. YOLOv8n ONNX under onnxruntime-gpu handles a
+# handful of cameras within a ~2GB VRAM budget and coexists with the generative
+# stack. Enable DeepStream only when you need many high-FPS streams.
+#
+# Usage:
+#   1. Set DETECTOR_BACKEND=deepstream in .env
+#   2. docker compose -f docker-compose.yml -f docker-compose.deepstream.yml up -d
+#
+# The vms service then sources detections from the DeepStream container's
+# metadata stream (see app/detect/deepstream_client.py) over the internal
+# compose network instead of running ONNX inference itself. No host port is
+# published for DeepStream; vms reaches it via the service name `deepstream`.
+services:
+  vms:
+    environment:
+      # Point the vms backend at the DeepStream metadata endpoint on the shared
+      # compose network (overrides the value in .env).
+      DETECTOR_BACKEND: deepstream
+      DEEPSTREAM_URL: http://deepstream:8121
+    depends_on:
+      - deepstream
+
+  deepstream:
+    image: nvcr.io/nvidia/deepstream:7.1-triton-multiarch
+    container_name: vms-deepstream
+    restart: unless-stopped
+    # The DeepStream pipeline config + person-detect/tracker graph and the small
+    # metadata-publishing app live under ./deepstream (provided separately when
+    # this optional backend is adopted). Bound read-only into the container.
+    volumes:
+      - ./deepstream:/app/deepstream:ro
+      - ./models:/app/models:ro
+    working_dir: /app/deepstream
+    # Replace with the actual launch command for your DeepStream graph; it must
+    # ingest the configured RTSP cameras and expose person-detection metadata on
+    # :8121 for the vms backend to consume.
+    command: ["sleep", "infinity"]
+    shm_size: "1g"
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]

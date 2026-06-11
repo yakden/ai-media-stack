@@ -1,0 +1,42 @@
+services:
+  vms:
+    build: .
+    image: vms:latest
+    container_name: vms
+    restart: unless-stopped
+    ports:
+      # Loopback only — reached via the nginx SSO gateway (vms.1c-rus.ru),
+      # never exposed on the public IP directly.
+      - "127.0.0.1:8120:8120"
+    env_file:
+      - .env
+    volumes:
+      # Single source of truth for metadata + media: vms.db (WAL), recordings,
+      # thumbnails, enrollment photos, and the rolling ffmpeg segment buffer.
+      - ./data:/app/data
+      # YOLOv8n.onnx + insightface buffalo_l pack. Persisted across rebuilds so
+      # models are downloaded once (scripts/download_models.py).
+      - ./models:/app/models
+      - ./app:/app/app
+    # OpenCV/ffmpeg + multiprocessing frame slots use POSIX shared memory.
+    shm_size: "512m"
+    # Hard RAM cap so the VMS can NEVER push the shared host into a global OOM
+    # that would kill the 1C VM. If VMS exceeds this, a cgroup-scoped OOM kills a
+    # camera worker (it restarts) — the 1C VM stays up. oom_score_adj makes VMS
+    # the preferred victim if any host-wide pressure ever occurs (1C is -1000).
+    mem_limit: 6g
+    memswap_limit: 6g
+    oom_score_adj: 800
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://127.0.0.1:8120/health"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 60s

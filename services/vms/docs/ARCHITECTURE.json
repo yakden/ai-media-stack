@@ -1,0 +1,123 @@
+{
+  "stack": "Backend: Python 3.10 + FastAPI + Uvicorn (matches the existing whisper-xtts-server conventions; same Dockerfile base lineage). SQLAlchemy 2.x ORM over SQLite (WAL mode) for metadata — zero-ops, single-box, plenty for MVP. Pydantic v2 / pydantic-settings for config.\n\nCamera workers: one subprocess per enabled camera, spawned by the API process via Python multiprocessing. Each worker uses OpenCV (cv2.VideoCapture with FFMPEG backend, RTSP over TCP) to pull frames, runs person detection with onnxruntime-gpu (YOLOv8n exported to ONNX, fp16) — chosen over the ultralytics PyTorch package to keep the image small and VRAM modest; falls back to onnxruntime CPU if GPU is contended. Recording is done by a second ffmpeg process per camera kept warm on a rolling segment buffer so pre-roll is available the instant a person is detected (ffmpeg -f segment writing N-second .mp4 segments; on trigger we concatenate the pre/post segments into a clip). This avoids re-encoding and keeps CPU/GPU light.\n\nFace recognition: insightface 'buffalo_l' pack (SCRFD detector + ArcFace r50 -> 512-d L2-normalized embedding) running under onnxruntime-gpu fp16. FAISS (faiss-cpu) IndexFlatIP over normalized embeddings for cosine-similarity matching; the index is small (hundreds of people) so CPU FAISS is ample and keeps it off the GPU. Embeddings persisted in SQLite as BLOB and the FAISS index rebuilt on startup from the DB (single source of truth).\n\nLive monitoring: MJPEG — simplest reliable option. Each worker publishes its latest annotated JPEG frame to a shared in-memory ring (one slot per camera, written via multiprocessing shared memory / a small frames dir); the API exposes multipart/x-mixed-replace MJPEG streams and single-snapshot JPEGs. No HLS/transcode pipeline needed for the grid, so no extra ffmpeg muxing latency.\n\nGPU budget: YOLOv8n fp16 (~150MB) + SCRFD+ArcFace fp16 (~600MB) + onnxruntime CUDA context (~700MB) ≈ under 2GB total for a handful of cameras — coexists with the generative stack; detector can be forced to CPU via env if the control-plane signals eviction. DeepStream 7.1 (nvcr.io/nvidia/deepstream:7.1-triton-multiarch) is wired as an OPTIONAL high-throughput backend (DETECTOR_BACKEND=deepstream) but NOT required to build or run the MVP.\n\nFrontend: vanilla JS SPA (no build step) — a few static HTML/CSS/JS files served by FastAPI StaticFiles. Pages: Live grid (MJPEG <img> tags), Cameras (CRUD), Events history (filter + HTML5 <video> playback of clip + thumbnail + recognized name), People (enroll from photo upload, list, delete). Keeps the toolchain to just pip + docker, consistent with the box.",
+  "structure": "vms/                                  # MVP VMS monorepo (repo root subdir; self-contained compose project)\n├── docker-compose.yml                 # vms service, 127.0.0.1:8120, nvidia GPU reservation, volume mounts\n├── docker-compose.deepstream.yml      # OPTIONAL override: DeepStream backend service (not built by default)\n├── Dockerfile                         # CUDA 12.4 cudnn runtime + python + ffmpeg + onnxruntime-gpu + faiss + insightface\n├── pyproject.toml                     # deps (fastapi, sqlalchemy, opencv-python-headless, onnxruntime-gpu, insightface, faiss-cpu, ...)\n├── .env.example                       # all config knobs with defaults\n├── .gitignore                         # data/, models/, *.db, *.mp4\n├── README.md                          # build/run + SSO/nginx + control-plane integration docs\n├── scripts/\n│   └── download_models.py             # fetch YOLOv8n.onnx + insightface buffalo_l into models/ (run once / on build)\n├── models/                            # (gitignored) yolov8n.onnx, insightface buffalo_l/*.onnx  — bind-mounted\n├── data/                              # (gitignored, bind-mounted) vms.db, recordings/, thumbnails/, faces/, segments/\n│   ├── recordings/                    #   <camera_id>/<event_id>.mp4\n│   ├── thumbnails/                    #   <event_id>.jpg\n│   ├── faces/                         #   <person_id>/<photo>.jpg (enrollment source images)\n│   └── segments/                      #   <camera_id>/seg_*.mp4 (rolling ffmpeg pre/post buffer)\n├── app/\n│   ├── __init__.py\n│   ├── main.py                        # FastAPI app factory; mounts routers + static; lifespan starts/stops WorkerManager\n│   ├── config.py                      # Settings (pydantic-settings): ports, paths, thresholds, device, backend, SSO header name\n│   ├── auth.py                        # trusted-header SSO dependency (reads X-Email/X-User); optional API_KEY bearer fallback\n│   ├── db/\n│   │   ├── __init__.py\n│   │   ├── database.py                # engine, SessionLocal, get_db dependency, init_db (create_all + WAL pragma)\n│   │   └── models.py                  # SQLAlchemy ORM: Camera, Event, Person, FaceEmbedding\n│   ├── schemas.py                     # Pydantic request/response models for all endpoints\n│   ├── api/\n│   │   ├── __init__.py\n│   │   ├── cameras.py                 # /api/cameras CRUD + status\n│   │   ├── events.py                  # /api/events list/filter/get/delete + clip + thumbnail serving\n│   │   ├── people.py                  # /api/people enroll/list/delete (face DB management)\n│   │   ├── live.py                    # /api/live MJPEG stream + snapshot per camera\n│   │   └── system.py                  # /health, /api/system (worker states, model/VRAM info)\n│   ├── workers/\n│   │   ├── __init__.py\n│   │   ├── manager.py                 # WorkerManager: spawn/stop one CameraWorker process per enabled camera; status registry; frame-slot access\n│   │   └── camera_worker.py           # per-camera process: RTSP read loop, detect, trigger clip, write annotated frame slot, emit events to DB\n│   ├── detect/\n│   │   ├── __init__.py\n│   │   ├── base.py                    # Detector ABC (detect(frame) -> list[Box]) + factory by DETECTOR_BACKEND\n│   │   ├── yolo_onnx.py               # YOLOv8n ONNX person detector (onnxruntime, fp16, CUDA/CPU)\n│   │   └── deepstream_client.py       # OPTIONAL: client to DeepStream metadata stream (used only when backend=deepstream)\n│   ├── faces/\n│   │   ├── __init__.py\n│   │   ├── recognizer.py              # insightface SCRFD+ArcFace wrapper: detect+embed faces in a frame -> 512-d vectors\n│   │   └── index.py                   # FaceIndex: FAISS IndexFlatIP, load-from-DB on init, add/search/remove, threshold match\n│   ├── recording/\n│   │   ├── __init__.py\n│   │   ├── segmenter.py               # manages the warm rolling ffmpeg segment process per camera\n│   │   └── clipper.py                 # on trigger: select pre/post segments, ffmpeg concat -> clip mp4, grab thumbnail frame\n│   └── static/                        # vanilla-JS SPA served by FastAPI\n│       ├── index.html                 # shell + tab nav (Live / Cameras / Events / People)\n│       ├── app.js                     # fetch wrappers, render grid/tables/forms, MJPEG <img>, <video> playback\n│       └── style.css\n└── tests/\n    ├── __init__.py\n    ├── test_api.py                    # camera/event/person CRUD against a temp SQLite DB (TestClient)\n    └── test_faces.py                  # FaceIndex add/search/remove + threshold behavior with synthetic embeddings",
+  "data_model": "SQLite via SQLAlchemy 2.x (WAL). Four tables.\n\ncameras\n  id            INTEGER PK autoincrement\n  name         TEXT NOT NULL\n  rtsp_url     TEXT NOT NULL\n  enabled      BOOLEAN NOT NULL default 1\n  status       TEXT NOT NULL default 'offline'   -- 'online' | 'offline' | 'error' (updated by worker heartbeat)\n  last_seen    DATETIME NULL                      -- last successful frame time\n  created_at   DATETIME default now\n  -- per-camera tunables (nullable -> fall back to global env defaults):\n  detect_conf  REAL NULL                          -- person confidence threshold\n  pre_seconds  INTEGER NULL                        -- pre-roll buffer\n  post_seconds INTEGER NULL                        -- post-roll buffer\n\nevents\n  id            INTEGER PK autoincrement\n  camera_id    INTEGER FK->cameras.id ON DELETE CASCADE, INDEX\n  ts           DATETIME NOT NULL INDEX             -- event (person-appeared) time\n  end_ts       DATETIME NULL                       -- when clip recording finished\n  clip_path    TEXT NULL                           -- data/recordings/<camera_id>/<event_id>.mp4 (relative)\n  thumb_path   TEXT NULL                           -- data/thumbnails/<event_id>.jpg\n  person_id    INTEGER NULL FK->persons.id ON DELETE SET NULL, INDEX  -- best face match, if any\n  person_name  TEXT NULL                           -- denormalized snapshot of matched name at event time\n  match_score  REAL NULL                           -- cosine similarity of best match\n  label        TEXT NOT NULL default 'person'      -- detected class (always 'person' in MVP)\n  created_at   DATETIME default now\n  composite index (camera_id, ts) for history filtering\n\npersons\n  id            INTEGER PK autoincrement\n  name         TEXT NOT NULL\n  notes        TEXT NULL\n  created_at   DATETIME default now\n\nface_embeddings\n  id            INTEGER PK autoincrement\n  person_id    INTEGER FK->persons.id ON DELETE CASCADE, INDEX\n  vector       BLOB NOT NULL                       -- 512 float32 little-endian, L2-normalized (np.tobytes)\n  image_path   TEXT NULL                           -- data/faces/<person_id>/<file>.jpg source photo\n  faiss_id     INTEGER NULL                        -- position id in the FAISS index (for remove/rebuild mapping)\n  created_at   DATETIME default now\n\nFAISS index is derived state: rebuilt at startup by streaming face_embeddings.vector into an IndexFlatIP (inner product == cosine on normalized vectors). DB is the single source of truth; index never persisted separately.",
+  "api_contracts": "All JSON unless noted. All routes behind nginx SSO (trusted X-Email/X-User header); auth.py also accepts optional Bearer API_KEY for tunneled/CLI use. Base: served at https://vms.1c-rus.ru, internally 127.0.0.1:8120.\n\nSystem / health\n  GET  /health                         -> {status, version, gpu:{used_mb,total_mb}, workers:[{camera_id,state}]}  (no auth)\n  GET  /api/system                     -> detailed worker + model + backend info\n\nCameras (cameras.py)\n  GET    /api/cameras                  -> [Camera{id,name,rtsp_url,enabled,status,last_seen,...}]\n  POST   /api/cameras                  body CameraCreate{name,rtsp_url,enabled?,detect_conf?,pre_seconds?,post_seconds?} -> Camera (201; starts worker if enabled)\n  GET    /api/cameras/{id}             -> Camera\n  PUT    /api/cameras/{id}             body CameraUpdate (partial) -> Camera (restarts worker on rtsp/enabled change)\n  DELETE /api/cameras/{id}             -> 204 (stops worker; events kept, cascade per FK)\n  GET    /api/cameras/{id}/status      -> {status, last_seen, fps, detector}\n\nLive (live.py)\n  GET  /api/live/{camera_id}/stream    -> multipart/x-mixed-replace MJPEG (annotated frames, person boxes drawn)\n  GET  /api/live/{camera_id}/snapshot  -> image/jpeg (latest single frame)\n\nEvents / history (events.py)\n  GET    /api/events                   query: camera_id?, person_id?, from?(ISO), to?(ISO), label?, limit?, offset?\n                                          -> {total, items:[Event{id,camera_id,camera_name,ts,end_ts,person_id,person_name,match_score,thumb_url,clip_url}]}\n  GET    /api/events/{id}              -> Event (full)\n  DELETE /api/events/{id}              -> 204 (also removes clip + thumb files)\n  GET    /api/events/{id}/clip         -> video/mp4 (Range-supported streaming of recorded clip)\n  GET    /api/events/{id}/thumbnail    -> image/jpeg\n\nPeople / face DB (people.py)\n  GET    /api/people                   -> [Person{id,name,notes,num_faces}]\n  POST   /api/people                   body PersonCreate{name,notes?} -> Person (201)\n  POST   /api/people/{id}/faces        multipart file=<image> -> {embedding_id, faces_detected, image_path}  (detect->embed->store->add to FAISS)\n  GET    /api/people/{id}/faces        -> [FaceEmbedding{id,image_url,created_at}]\n  DELETE /api/people/{id}/faces/{fid}  -> 204 (remove embedding + rebuild/patch FAISS)\n  PUT    /api/people/{id}              body PersonUpdate -> Person\n  DELETE /api/people/{id}              -> 204 (cascade faces, rebuild FAISS, events.person_id set null)\n\nStatic SPA\n  GET  /                               -> static/index.html\n  GET  /app.js /style.css /...         -> static assets\n\nStreams summary: MJPEG (multipart/x-mixed-replace) for live; HTTP Range mp4 for clip playback. No websockets needed for MVP.",
+  "components": [
+    {
+      "name": "Backend core & app wiring",
+      "responsibility": "FastAPI app factory, lifespan that boots WorkerManager and FaceIndex, config (Settings), trusted-header SSO + optional API_KEY auth dependency, DB engine/session/init, static SPA mounting, /health and /api/system endpoints. The integration glue every other component plugs into.",
+      "owns_paths": [
+        "vms/app/__init__.py",
+        "vms/app/main.py",
+        "vms/app/config.py",
+        "vms/app/auth.py",
+        "vms/app/db/__init__.py",
+        "vms/app/db/database.py",
+        "vms/app/api/__init__.py",
+        "vms/app/api/system.py"
+      ]
+    },
+    {
+      "name": "Data model & schemas",
+      "responsibility": "SQLAlchemy ORM models (Camera, Event, Person, FaceEmbedding) with relationships/cascades/indexes, and all Pydantic request/response schemas shared across routers.",
+      "owns_paths": [
+        "vms/app/db/models.py",
+        "vms/app/schemas.py"
+      ]
+    },
+    {
+      "name": "Camera management API",
+      "responsibility": "Camera CRUD + status endpoints; on create/update/delete calls WorkerManager to start/stop/restart the camera worker; reports online/offline status from worker heartbeat.",
+      "owns_paths": [
+        "vms/app/api/cameras.py"
+      ]
+    },
+    {
+      "name": "Camera workers & detection",
+      "responsibility": "WorkerManager (spawn/stop per-camera processes, status registry, latest-frame slots) and the per-camera worker loop: RTSP read via OpenCV, run detector, draw boxes for the MJPEG slot, debounce person triggers, invoke recording.clipper, run faces.recognizer on clip thumbnail, write Event rows. Plus the detector abstraction and YOLOv8n ONNX implementation and the optional DeepStream client.",
+      "owns_paths": [
+        "vms/app/workers/__init__.py",
+        "vms/app/workers/manager.py",
+        "vms/app/workers/camera_worker.py",
+        "vms/app/detect/__init__.py",
+        "vms/app/detect/base.py",
+        "vms/app/detect/yolo_onnx.py",
+        "vms/app/detect/deepstream_client.py"
+      ]
+    },
+    {
+      "name": "Recording (segmenter + clipper)",
+      "responsibility": "Warm rolling ffmpeg segment buffer per camera (pre-roll) and clip assembly: on trigger select pre/post segments, ffmpeg concat into <event_id>.mp4 without re-encode, extract a thumbnail JPEG. Pure recording mechanics, called by the worker.",
+      "owns_paths": [
+        "vms/app/recording/__init__.py",
+        "vms/app/recording/segmenter.py",
+        "vms/app/recording/clipper.py"
+      ]
+    },
+    {
+      "name": "Face recognition & index",
+      "responsibility": "insightface SCRFD+ArcFace wrapper (detect+embed faces -> 512-d normalized vectors) and the FAISS FaceIndex (load-from-DB on init, add/search/remove, cosine threshold matching). Used by the worker for matching and by the people API for enrollment.",
+      "owns_paths": [
+        "vms/app/faces/__init__.py",
+        "vms/app/faces/recognizer.py",
+        "vms/app/faces/index.py"
+      ]
+    },
+    {
+      "name": "Events history API",
+      "responsibility": "Event list/filter/get/delete, Range-streaming clip serving, thumbnail serving. Read/serve side of recordings + matched identities.",
+      "owns_paths": [
+        "vms/app/api/events.py"
+      ]
+    },
+    {
+      "name": "Live monitoring API",
+      "responsibility": "MJPEG multipart stream and single-snapshot JPEG endpoints, reading latest annotated frames from the WorkerManager frame slots.",
+      "owns_paths": [
+        "vms/app/api/live.py"
+      ]
+    },
+    {
+      "name": "People / face-DB API",
+      "responsibility": "Person CRUD and enrollment endpoints: accept uploaded photos, call recognizer to embed, persist FaceEmbedding, add/remove from FaceIndex; manage the known-faces DB.",
+      "owns_paths": [
+        "vms/app/api/people.py"
+      ]
+    },
+    {
+      "name": "Frontend SPA",
+      "responsibility": "Vanilla-JS single-page UI served by the backend: Live grid (MJPEG imgs), Cameras CRUD form, Events history with filters + clip playback + thumbnail + recognized name, People enrollment/management.",
+      "owns_paths": [
+        "vms/app/static/index.html",
+        "vms/app/static/app.js",
+        "vms/app/static/style.css"
+      ]
+    },
+    {
+      "name": "Packaging, deploy & infra docs",
+      "responsibility": "Dockerfile, pyproject deps, docker-compose (+ optional DeepStream override), .env.example, .gitignore, README with build/run + nginx SSO vhost + control-plane registry snippet, and the model download script. No app/ Python logic.",
+      "owns_paths": [
+        "vms/Dockerfile",
+        "vms/pyproject.toml",
+        "vms/docker-compose.yml",
+        "vms/docker-compose.deepstream.yml",
+        "vms/.env.example",
+        "vms/.gitignore",
+        "vms/README.md",
+        "vms/scripts/download_models.py"
+      ]
+    },
+    {
+      "name": "Tests",
+      "responsibility": "API CRUD tests against a temp SQLite DB via TestClient, and FaceIndex add/search/remove + threshold tests with synthetic embeddings. Detection/RTSP mocked.",
+      "owns_paths": [
+        "vms/tests/__init__.py",
+        "vms/tests/test_api.py",
+        "vms/tests/test_faces.py"
+      ]
+    }
+  ],
+  "ports": "VMS backend binds 127.0.0.1:8120 (next free port; in-use on box: 8000 tts, 8088 webui, 8090 control-plane, 8095 sso, 8100 avatar, 11434 ollama). Public access via https://vms.1c-rus.ru reverse-proxied to 127.0.0.1:8120. Optional DeepStream backend (when enabled) talks to the VMS over an internal compose-network socket / shared metadata, not a host port. RTSP cameras are outbound connections from the worker (no inbound port). MJPEG and clip playback ride the single 8120 HTTP port.",
+  "integration": "docker-compose (vms/docker-compose.yml) — one service mirroring the existing whisper-xtts pattern:\n  services:\n    vms:\n      build: .\n      image: vms:latest\n      container_name: vms\n      restart: unless-stopped\n      ports: [\"127.0.0.1:8120:8120\"]      # loopback only, reached via nginx\n      env_file: [.env]\n      volumes:\n        - ./data:/app/data                  # vms.db, recordings, thumbnails, faces, segments\n        - ./models:/app/models              # yolov8n.onnx + insightface buffalo_l\n      shm_size: \"512m\"                       # OpenCV/ffmpeg + multiprocessing frame slots\n      deploy: { resources: { reservations: { devices: [{driver: nvidia, count: 1, capabilities: [gpu]}] } } }\n  docker-compose.deepstream.yml is an OPTIONAL override adding a `deepstream` service from nvcr.io/nvidia/deepstream:7.1-triton-multiarch on the same network; only used when DETECTOR_BACKEND=deepstream. Default MVP build ignores it.\n\nnginx + Let's Encrypt + cookie-SSO (new vhost /etc/nginx/sites-available/vms.1c-rus.ru, same shape as webui.1c-rus.ru):\n  - 80 -> ACME + 301 to https.\n  - 443 ssl with Let's Encrypt cert for vms.1c-rus.ru.\n  - location = /sso/auth { internal; proxy_pass http://127.0.0.1:8095/auth; proxy_pass_request_body off; }\n    location /sso/ { proxy_pass http://127.0.0.1:8095/; }\n    location @login { return 302 https://ai.1c-rus.ru/sso/login?rd=https://$host$request_uri; }\n    location / { auth_request /sso/auth; error_page 401 = @login;\n                 auth_request_set $sso_email $upstream_http_x_auth_email;\n                 proxy_set_header X-Email $sso_email; proxy_set_header X-User $sso_user;\n                 proxy_pass http://127.0.0.1:8120; ...proxy_params...; proxy_read_timeout 1200s;\n                 proxy_buffering off;  # required so MJPEG multipart streams flush per-frame\n               }\n  - client_max_body_size 64m at server level for face-photo uploads.\n  app/auth.py trusts X-Email/X-User (set name via SSO_HEADER env) and treats the presence of the header as authenticated; an optional API_KEY bearer path is kept for SSH-tunnel/CLI access.\n\nControl-plane registration (append one dict to SERVICES in /opt/control-plane/app.py, then `systemctl restart control-plane`):\n  {\n    \"name\": \"vms\",\n    \"title\": \"Video Management — RTSP person detection + face recognition\",\n    \"container\": \"vms\",\n    \"compose\": \"/home/deploy/whisper-xtts-server/vms/docker-compose.yml\",\n    \"health\": \"http://127.0.0.1:8120/health\",\n    \"port\": 8120,\n    \"docs\": \"/\"\n  }\n  This makes VMS start/stop/restart-able from the control-plane dashboard and surfaces its health + GPU usage. GPU-eviction friendly: VMS keeps ~2GB; when the control-plane pauses it for a heavy generative job (e.g. Wan2.2), workers stop cleanly and resume on restart. Setting DETECTOR_BACKEND=cpu (env) lets it keep running detection on CPU during GPU pressure if desired."
+}

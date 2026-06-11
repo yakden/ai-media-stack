@@ -4,6 +4,20 @@ All notable changes to this project are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/), and this project
 adheres to [Semantic Versioning](https://semver.org/).
 
+## [1.1.0] — 2026-06-11
+
+### Added
+- **Video surveillance (VMS)** published as [`services/vms`](services/vms) — RTSP camera management,
+  person-triggered clip recording (pre/post-roll), a live MJPEG monitoring grid, events history with
+  playback, and face recognition (SCRFD + ArcFace + FAISS). Ships **code only** — no camera data, face
+  embeddings, recordings or database (those stay on the operator's box).
+- README now documents the **full platform**: VMS, creative media tools (IOPaint object removal,
+  Wan/ComfyUI video generation), and the SD + ControlNet render service.
+
+### Changed
+- NOTICE expanded with the VMS third-party stack — including the **Ultralytics YOLOv8 AGPL-3.0** caveat,
+  InsightFace, FAISS, ONNX Runtime, ffmpeg, IOPaint and Wan/ComfyUI.
+
 ## [1.0.0] — 2026-06-11
 
 First stable public release. The platform grew from a set of GPU services into a coherent,

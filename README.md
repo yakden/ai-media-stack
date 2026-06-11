@@ -8,7 +8,7 @@ Floor-plan → 3D · live voice-to-voice translation in your own voice · video 
 talking avatars · on-box LLMs — all behind one **GPU job-broker** with automatic model-swapping,
 and one **API gateway** with keys, per-key metering, quotas and billing.
 
-![Version](https://img.shields.io/badge/release-v1.0.0-brightgreen)
+![Version](https://img.shields.io/badge/release-v1.1.0-brightgreen)
 ![License](https://img.shields.io/badge/license-MIT-blue)
 ![Python](https://img.shields.io/badge/python-3.10%2B-3776AB)
 ![FastAPI](https://img.shields.io/badge/FastAPI-009688)
@@ -44,6 +44,8 @@ It’s a complete, opinionated reference for **how to ship multiple GPU AI servi
 | 🧮 **GPU broker** | One heavy model resident on the T4, graceful auto-swap, single FIFO queue, live position/ETA — translation and voice **coexist**, heavy 3D/render jobs swap on demand. |
 | 🔐 **API gateway** | API-key auth, per-key usage + tokens, **monthly quotas (402)**, **rate limits (429)**, billing, audit log. |
 | 🛠️ **Admin control panel** | Tabbed, mobile-first: live GPU/queue/system monitoring, **start/stop/restart every service**, keys & billing, a launchpad to open the tools, and **add models** (Ollama pull) on the fly. |
+| 📹 **Video surveillance (VMS)** | RTSP cameras → **person-triggered clip recording** (pre/post-roll), a live MJPEG monitoring grid, events history with playback, and **face recognition** (SCRFD + ArcFace + FAISS) that attaches an identity to each event. |
+| 🎨 **Creative media tools** | Object removal from photos (IOPaint — LaMa + SAM2) and short-video generation (Wan via ComfyUI), deployed behind the same SSO + gateway. |
 
 ## 📸 Screenshots
 
@@ -96,6 +98,11 @@ flowchart TD
 | [`control-plane`](services/control-plane) | 8090 | Ops dashboard (services, GPU, system) |
 | [`floorplan3d`](services/floorplan3d) | 8204 | CPU wrapper: OCR + Mask-R-CNN + medial-axis wall vectorization |
 | [`cubicasa-service`](services/cubicasa-service) | 8205 | CPU wrapper: neural plan parsing (walls/rooms/doors/windows) + colour-based apartments |
+| [`vms`](services/vms) | 8120 | Video Management System: RTSP cameras, person-triggered recording, live grid, face recognition |
+
+> Also integrated behind the gateway (third-party stacks, deployed not vendored): **IOPaint** (object
+> removal), **Wan/ComfyUI** (video generation), **Open WebUI** (chat), **Ollama** (model backend),
+> and **SD + ControlNet** render for the 3D pipeline.
 
 ## 🌟 Engineering highlights
 
@@ -183,7 +190,8 @@ serves them in parallel (~3 translations/sec on a single T4). See [docs/API.md](
 ## 🧩 Tech
 
 FastAPI · Docker · NVIDIA T4 · PyTorch · TensorFlow · OpenCV · scikit-image · Three.js ·
-Whisper · Coqui XTTS · MuseTalk · Mask R-CNN · CubiCasa5k · Ollama (Qwen / Llama).
+Whisper · Coqui XTTS · MuseTalk · Mask R-CNN · CubiCasa5k · Ollama (Qwen / Llama / EuroLLM / TranslateGemma) ·
+YOLOv8 · InsightFace (SCRFD + ArcFace) · FAISS · ONNX Runtime · ffmpeg · SAM2 · LaMa.
 
 ## 📜 License
 
