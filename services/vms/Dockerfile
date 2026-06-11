@@ -25,8 +25,15 @@ WORKDIR /app
 # Install Python deps first (better layer caching). onnxruntime-gpu pulls the
 # matching CUDA EP; cuDNN/CUDA libs come from the base image.
 COPY pyproject.toml ./
+# NB: insightface hard-depends on `onnxruntime` (CPU build), which installs into the
+# SAME `onnxruntime` package dir as `onnxruntime-gpu` and SHADOWS it — leaving only the
+# CPUExecutionProvider at runtime (detection/face/ReID fall back to CPU ≈ 7 cores/camera).
+# Drop the CPU build and reinstall the GPU build so the CUDAExecutionProvider is present —
+# this is what offloads the heavy inference to the T4.
 RUN pip3 install --upgrade pip \
-    && pip3 install .
+    && pip3 install . \
+    && pip3 uninstall -y onnxruntime \
+    && pip3 install --force-reinstall --no-deps onnxruntime-gpu
 
 # Application code (owned by other components; copied as a tree).
 COPY app ./app

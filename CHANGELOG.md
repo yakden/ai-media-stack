@@ -4,6 +4,16 @@ All notable changes to this project are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/), and this project
 adheres to [Semantic Versioning](https://semver.org/).
 
+## [1.2.0] — 2026-06-11
+
+### Changed
+- **VMS inference moved to the GPU.** Detection (YOLOv8n), face recognition (SCRFD + ArcFace) and
+  ReID now run on the T4 via the **CUDAExecutionProvider** instead of the CPU. Root cause was a
+  packaging conflict — `insightface` pulls the CPU `onnxruntime`, which installs into the same module
+  and **shadows `onnxruntime-gpu`**; the Dockerfile now drops the CPU build and reinstalls the GPU one.
+  Result: per-camera CPU fell from ~7 cores to ~0.5 core (~14 cores freed at 2 cameras), host load
+  average ~20 → ~4 — the box can now run many more cameras (GPU VRAM / RAM become the new ceiling).
+
 ## [1.1.1] — 2026-06-11
 
 ### Fixed
