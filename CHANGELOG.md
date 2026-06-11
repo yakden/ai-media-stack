@@ -4,6 +4,15 @@ All notable changes to this project are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/), and this project
 adheres to [Semantic Versioning](https://semver.org/).
 
+## [1.3.4] — 2026-06-12
+
+### Changed
+- **Mobile-first responsive VMS UI.** The interface adapts to phones: the tab bar becomes a
+  swipeable strip (all tabs reachable), card grids and KPIs reflow for small screens, modals go
+  full-width with stacked detail rows, controls are touch-sized, and wide tables scroll. On desktop
+  the **preview thumbnails are larger** (events / identities / People / clip grids), for easier
+  reviewing.
+
 ## [1.3.3] — 2026-06-12
 
 ### Changed

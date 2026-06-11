@@ -8,7 +8,7 @@ Floor-plan → 3D · live voice-to-voice translation in your own voice · video 
 talking avatars · on-box LLMs — all behind one **GPU job-broker** with automatic model-swapping,
 and one **API gateway** with keys, per-key metering, quotas and billing.
 
-![Version](https://img.shields.io/badge/release-v1.3.3-brightgreen)
+![Version](https://img.shields.io/badge/release-v1.3.4-brightgreen)
 ![License](https://img.shields.io/badge/license-MIT-blue)
 ![Python](https://img.shields.io/badge/python-3.10%2B-3776AB)
 ![FastAPI](https://img.shields.io/badge/FastAPI-009688)
