@@ -122,23 +122,30 @@ flowchart TD
   heavy 3D/render jobs swap the translation model out on demand and restore it when idle. Concurrent
   translation requests are served in parallel and **fail-fast under contention** instead of piling up —
   the API stays responsive even when an external client bursts.
+- **Face-anchored cross-camera re-identification.** Identities are built *purely from cameras* (no manual
+  enrollment): face (SCRFD + ArcFace) is the cross-day anchor, with a **multi-view, pose-bucketed gallery**
+  (signed yaw from the landmarks → frontal/left/right exemplars) for angle-invariant matching; clothing
+  (OSNet-AIN) is a within-session helper only; matching is class-scoped (people, vehicles, objects). A faceless
+  back-view never fabricates a duplicate person — the design is **correct under the constraint that only faces
+  carry identity**. See [ARCHITECTURE](docs/ARCHITECTURE.md).
 - **Honest licensing.** Third-party models are integrated, not vendored — see [NOTICE](NOTICE.md).
 
 ## 🗺️ Roadmap
 
-**Shipped in v1.0**
+**Shipped**
 - [x] Multilingual translation API — single / batch / many-languages, source auto-detect, model selection
-- [x] Translation-tuned models (EuroLLM-9B, TranslateGemma-12B) + concurrent serving (8-way parallel)
+- [x] Translation-tuned models (EuroLLM-9B, TranslateGemma-12B) + concurrent / broker-routed serving
 - [x] Tabbed, mobile-first **admin control panel** — monitoring, service start/stop, keys & billing, model management
-- [x] GPU orchestration that lets translation + voice **coexist**, heavy jobs swap on demand
-- [x] Concurrency-safe heavy-model routing (no pile-ups under load)
+- [x] GPU orchestration that lets translation + voice **coexist**, heavy jobs swap on demand; concurrency-safe routing
+- [x] **Video surveillance (VMS)** on the GPU — cross-camera, **face-anchored re-identification** with a
+      multi-view pose-bucketed gallery, class-scoped object identification, and a face-first People analytics dashboard
 
 **Next**
+- [ ] **AdaFace** (quality-adaptive) face model for low-resolution camera faces; per-track best-frame selection
 - [ ] MCP adapter (expose the gateway’s OpenAPI to AI agents via `mcpo`)
 - [ ] Per-key invoice export (CSV/PDF) from the billing event log
 - [ ] One-command `docker compose` for the whole stack
-- [ ] Multi-GPU sharding (scale translation throughput past a single T4)
-- [ ] Cached XTTS speaker latents (lower voice-clone latency)
+- [ ] Multi-GPU sharding (scale past a single T4); cached XTTS speaker latents
 - [ ] Trained floor-plan parser fine-tune for non-coloured / CAD plans
 
 ## 🚀 Quickstart (one service)

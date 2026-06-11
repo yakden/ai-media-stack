@@ -26,3 +26,45 @@ The **api-gateway** wraps every service in one multi-tenant REST surface:
    any angle/curve/thickness (load-bearing vs partition), + colour-based **apartment** segmentation on multi-unit floors.
 3. **Render** (3D): a Three.js scene assembled from the above — saved, linkable, with a render library.
 Renders are **off by default** (toggle) to save GPU; only the 3D plan is built.
+
+## Translation & on-box LLMs
+The gateway exposes machine translation (`/v1/translate` · `/batch` · `/multi` · `/detect`) over on-box LLMs
+(Ollama). Light models — **EuroLLM-9B** (the default, translation-tuned for 35 European languages) — run
+**directly** and **concurrently** (`OLLAMA_NUM_PARALLEL`); a heavy model — **TranslateGemma-12B** — is
+**routed through the broker** (`/api/llm`) so it gets the whole GPU (fully on-GPU, no CPU offload). Under
+contention the broker route **fails fast with 503 + client backoff**, so concurrent bursts queue cleanly
+instead of exhausting the thread pool. Model choice, source auto-detect and skip-if-already-in-target are
+per-request; usage is metered like every other service.
+
+## Cross-camera person & object identification (VMS)
+Each RTSP camera runs an independent worker: **YOLOv8n** (person + COCO objects, on the GPU via
+`onnxruntime-gpu`) → a greedy-IoU tracker for short-term single-camera continuity → periodic crop embedding →
+an **IdentityManager** that assigns each track to a cross-camera **Identity** (or mints a new one).
+
+Identity is **anchored on the face** — the only cue stable across clothing changes, viewpoint, lighting and
+days:
+
+- **Face** = SCRFD-10G detect + 5 landmarks → affine align → ArcFace 512-d. It is the primary, cross-day
+  linker. A person is registered **only when a *decent* face is seen** (a `det_score × frontalness` quality
+  gate); a faceless back/side view **never spawns a new identity** — it can only attach to an existing person
+  by appearance *within a session*. This is what stops one person seen from behind from exploding into dozens
+  of duplicate identities.
+- **Multi-view face gallery** — exemplars are bucketed by a **signed yaw** (derived from the landmarks) into
+  *frontal / left / right* and kept pose-diverse (pose-aware eviction). A profile query then matches the stored
+  profile exemplar: angle-invariance **at the gallery level**, not just for whatever pose was captured first.
+- **Appearance** (OSNet-AIN x1.0, MSMT17) is a **within-session** helper only — time-windowed + exponentially
+  decayed — because clothing is not an identity across days.
+- Matching is **class-scoped** (`Identity.object_class`: a car only matches cars, a dog only dogs), with a
+  *best-minus-second-best margin* to reject ambiguous matches and quality/rate gates to resist explosion. A
+  maintenance pass decays, prunes and merges.
+
+Events record person-triggered clips (pre/post-roll, warm rolling ffmpeg segment buffer with a stall-watchdog);
+the **People** tab is a face-first analytics dashboard over these auto, cross-camera unique people (KPIs,
+per-camera and hourly charts, a per-person cross-camera sightings timeline).
+
+**GPU sharing** — all VMS inference runs on the *same* T4 as translation and voice: `onnxruntime-gpu` for
+detection / face / ReID (≈1 CPU core per camera vs ~7 on CPU), coexisting inside the 16 GB budget.
+
+**Honest limit** — a camera that only ever sees the back of a head carries no biometric any method can use;
+faces must be captured. The system is designed to be **correct under that constraint** (it does not fabricate
+identities from non-identifiable views) rather than to pretend otherwise.
