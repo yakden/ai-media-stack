@@ -66,6 +66,12 @@ class MatchConfig:
     min_app_box_area_frac: float = 0.01
     min_crop_quality_for_new: float = 0.10
     require_quality_for_new: bool = True
+    # Identity is anchored on the FACE/head (the only cross-clothing/cross-angle/
+    # cross-day signal). A faceless person crop (a back/side view) must NOT spawn a
+    # new person — it can only attach to an existing identity by appearance within a
+    # session, else it is dropped. This is what stops one person seen from behind
+    # from exploding into dozens of duplicate identities.
+    require_face_for_new_person: bool = True
     # Colour gate: reject an appearance match between non-person objects whose
     # hue histograms intersect below this (a red car must not become a blue one).
     color_gate: float = 0.35
@@ -321,10 +327,14 @@ class IdentityManager:
     # -- new-identity creation ------------------------------------------------
 
     def _quality_ok_for_new(self, feature: SightingFeature) -> bool:
-        if not self.cfg.require_quality_for_new:
-            return True
-        # A usable face always qualifies (faces are strong, rare evidence).
+        # A usable face always qualifies (faces are strong, rare evidence) — and for
+        # PERSON it is REQUIRED to register a new identity (face = the identity anchor).
         if feature.has_face and feature.face_vec is not None:
+            return True
+        obj_class = feature.object_class or "person"
+        if obj_class == "person" and self.cfg.require_face_for_new_person:
+            return False  # faceless back/side view -> never a new person
+        if not self.cfg.require_quality_for_new:
             return True
         if feature.appearance_vec is None:
             return False

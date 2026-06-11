@@ -355,6 +355,7 @@ class CameraWorker:
             min_face_pixels=int(c.get("reid_min_face_pixels", 24)),
             min_app_box_area_frac=float(c.get("reid_min_app_box_area_frac", 0.01)),
             require_quality_for_new=bool(c.get("reid_require_quality_for_new", True)),
+            require_face_for_new_person=bool(c.get("reid_require_face_for_new_person", True)),
             new_identity_rate_per_min=int(c.get("reid_new_identity_rate_per_min", 20)),
             app_temporal_fusion=bool(c.get("reid_app_temporal_fusion", False)),
         )

@@ -4,6 +4,16 @@ All notable changes to this project are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/), and this project
 adheres to [Semantic Versioning](https://semver.org/).
 
+## [1.3.1] — 2026-06-11
+
+### Changed
+- **Re-ID is now face-anchored** (the durable fix for duplicate people). A faceless person crop —
+  a back/side view — no longer spawns a NEW identity; it only attaches to an existing person by
+  appearance *within a session*, else it is dropped. One person seen from behind no longer explodes
+  into dozens of duplicates. Identity across clothing changes / angles / days rests on the **face**
+  (the only stable cross-day signal); clothing-appearance is a within-session helper only. New
+  setting `reid_require_face_for_new_person` (default on).
+
 ## [1.3.0] — 2026-06-11
 
 ### Added

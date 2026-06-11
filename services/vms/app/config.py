@@ -145,6 +145,10 @@ class Settings(BaseSettings):
     reid_min_app_box_area_frac: float = 0.01
     # Require a quality crop to CREATE a new identity (drop blurry singletons).
     reid_require_quality_for_new: bool = True
+    # Identity is anchored on the FACE: a faceless person (back/side view) never
+    # spawns a NEW identity — it only attaches to an existing one by appearance
+    # within a session, else is dropped. THE fix for back-view duplicate explosion.
+    reid_require_face_for_new_person: bool = True
     # How often the worker reloads the shared gallery from the DB.
     reid_gallery_reload_seconds: int = 30
     # How often the maintenance thread runs its decay/prune/merge pass.
