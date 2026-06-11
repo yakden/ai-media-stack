@@ -4,6 +4,16 @@ All notable changes to this project are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/), and this project
 adheres to [Semantic Versioning](https://semver.org/).
 
+## [1.2.1] — 2026-06-11
+
+### Changed
+- **VMS Re-ID upgraded to OSNet-AIN x1.0** (real MSMT17-trained weights from the OSNet author's
+  mirror) — domain-generalizable, much better cross-camera/cross-angle appearance matching for
+  people AND objects (class-scoped: cars match cars, etc.). Exported to ONNX FP16, runs on the GPU.
+- Added `scripts/calibrate_thresholds.py` — derive cosine thresholds from the live gallery
+  (same vs cross-identity distributions) instead of academic defaults.
+- Documented model-weight sourcing in the VMS README.
+
 ## [1.2.0] — 2026-06-11
 
 ### Changed

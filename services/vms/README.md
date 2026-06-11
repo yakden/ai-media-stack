@@ -288,3 +288,21 @@ pytest                                        # CRUD + FaceIndex tests (mocked d
   so recording stays CPU/GPU-light.
 - **Loopback only.** The container port is published on `127.0.0.1`; reach it
   through nginx or an SSH tunnel, never the public IP.
+
+## Model weights (not bundled)
+
+Weights are **not** shipped — fetch them and export once (the runtime needs only the ONNX):
+
+- **Face** (SCRFD + ArcFace): insightface `buffalo_l` pack — `python scripts/download_models.py`.
+- **Person/object Re-ID** (OSNet): get the real MSMT17-trained checkpoint from the OSNet author's
+  mirror [`kaiyangzhou/osnet`](https://huggingface.co/kaiyangzhou/osnet) and export to ONNX FP16:
+  ```bash
+  pip install torch torchvision torchreid onnx onnxscript onnxconverter-common opencv-python-headless
+  python scripts/export_reid_onnx.py --arch osnet_ain_x1_0 \
+      --pretrained osnet_ain_x1_0_msmt17_*.pth --fp16 \
+      --out models/osnet_ain_x1_0_msmt17.onnx
+  ```
+  `osnet_ain_x1_0` (AIN = domain-generalizable) gives the best cross-camera/angle accuracy; use
+  `osnet_x0_25` only on CPU-bound boxes. Set `REID_MODEL` to the exported file.
+- Tune thresholds on your own gallery with `scripts/calibrate_thresholds.py` (same vs cross-identity
+  cosine distributions → data-driven `FACE_MATCH_THRESHOLD` / `REID_APP_MATCH`).

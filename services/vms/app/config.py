@@ -101,9 +101,10 @@ class Settings(BaseSettings):
     # --- Automatic cross-camera identification (ReID) ---
     # Master switch; degrades gracefully (like faces) when off/unavailable.
     reid_enabled: bool = True
-    # OSNet appearance model exported to ONNX, under models_dir. Drop-in
-    # upgrade: point at osnet_ain_x1_0 for better cross-domain accuracy.
-    reid_model: str = "osnet_x0_25_msmt17.onnx"
+    # OSNet appearance model exported to ONNX, under models_dir. Default is the
+    # AIN x1.0 variant (domain-generalizable → best cross-camera/angle accuracy).
+    # Lighter fallback for CPU-bound boxes: osnet_x0_25_msmt17.onnx.
+    reid_model: str = "osnet_ain_x1_0_msmt17.onnx"
     # OSNet input geometry (WxH) — the torchreid ReID standard. 512-d output.
     reid_input_w: int = 128
     reid_input_h: int = 256
