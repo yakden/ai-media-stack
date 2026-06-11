@@ -332,10 +332,11 @@ def my_usage(x_api_key: str = Header(None), authorization: str = Header(None)):
 @app.get("/v1/models")
 def models(x_api_key: str = Header(None), authorization: str = Header(None)):
     _auth(x_api_key, authorization)
-    order = TRANSLATE_MODELS + [m for m in LLM_MODELS if m not in TRANSLATE_MODELS]
-    return {"models": [{"id": m, "description": LLM_MODELS[m],
+    allowed = _allowed_models()
+    order = [m for m in TRANSLATE_MODELS if m in allowed] + [m for m in allowed if m not in TRANSLATE_MODELS]
+    return {"models": [{"id": m, "description": allowed[m],
                         "good_for_translation": m in TRANSLATE_MODELS[:3]} for m in order],
-            "default": DEFAULT_LLM, "translate_recommended": TRANSLATE_MODELS[:3]}
+            "default": DEFAULT_LLM, "translate_recommended": [m for m in TRANSLATE_MODELS[:3] if m in allowed]}
 
 
 @app.post("/v1/llm/chat")
@@ -481,8 +482,9 @@ def detect(payload: dict, x_api_key: str = Header(None), authorization: str = He
 
 def _pick_model(payload):
     m = payload.get("model") or DEFAULT_LLM
-    if m not in LLM_MODELS:
-        raise HTTPException(400, f"model not allowed; use one of {list(LLM_MODELS)}")
+    allowed = _allowed_models()
+    if m not in allowed:
+        raise HTTPException(400, f"model not allowed; use one of {list(allowed)}")
     return m
 
 
@@ -984,6 +986,125 @@ def control_service(name: str, action: str,
             "log": ((rc.stdout or "") + (rc.stderr or "")).strip()[-400:]}
 
 
+# ----- Launchpad (USING the services) + connect info + model management -----
+LAUNCH_BUILTIN = [
+    {"title": "🎙️ Поточный перевод голоса", "url": "/voicestream/", "desc": "Микрофон → перевод → твой голос"},
+    {"title": "🎥 Веб-дубляж", "url": "/dub/", "desc": "Видео → перевод → липсинк"},
+    {"title": "🖼️ Аватар из фото", "url": "/animate/", "desc": "Фото + текст → говорящее видео"},
+    {"title": "🏠 Интерьер 3D", "url": "/interior3d/", "desc": "План → 3D-сцена, фотореализм"},
+    {"title": "🧮 GPU Очередь", "url": "/broker/", "desc": "Очередь задач, своп моделей, ETA"},
+    {"title": "💬 Open WebUI", "url": "https://webui.1c-rus.ru", "desc": "Чат с моделями"},
+    {"title": "🎨 IOPaint", "url": "https://paint.1c-rus.ru", "desc": "Удаление объектов с фото"},
+    {"title": "📹 VMS", "url": "https://vms.1c-rus.ru", "desc": "Камеры, распознавание лиц"},
+    {"title": "🐳 Portainer", "url": "https://portainer.1c-rus.ru", "desc": "Docker — логи, консоль"},
+    {"title": "🛰️ Control Plane", "url": "/", "desc": "Общая панель платформы"},
+]
+LAUNCH_F = os.path.join(DATA, "launch.json")     # пользовательские ссылки [{title,url,desc}]
+MODELS_F = os.path.join(DATA, "models.json")     # пользовательские модели {name: description}
+_PULLS = {}                                      # name -> {status, msg}
+_pull_lock = threading.Lock()
+
+
+def _allowed_models():
+    """Builtin allowlist + user-added models (persisted) — the effective set for translate/chat."""
+    m = dict(LLM_MODELS)
+    m.update(_load(MODELS_F, {}))
+    return m
+
+
+def _do_pull(name, desc):
+    with _pull_lock:
+        _PULLS[name] = {"status": "pulling", "msg": "загрузка…"}
+    try:
+        rc = subprocess.run(["sudo", "docker", "exec", "ollama", "ollama", "pull", name],
+                            capture_output=True, text=True, timeout=3600)
+        ok = rc.returncode == 0
+        msg = ((rc.stdout or "") + (rc.stderr or "")).strip()[-300:]
+    except Exception as exc:
+        ok, msg = False, str(exc)
+    if ok:
+        ex = _load(MODELS_F, {})
+        ex[name] = desc or "добавлена через админку"
+        _save(MODELS_F, ex)
+    with _pull_lock:
+        _PULLS[name] = {"status": "done" if ok else "error", "msg": msg}
+
+
+@app.get("/admin/launch")
+def admin_launch(authorization: str = Header(None), x_admin_key: str = Header(None)):
+    _admin(authorization, x_admin_key)
+    return {"builtin": LAUNCH_BUILTIN, "custom": _load(LAUNCH_F, []),
+            "api": {"base": "https://ai.1c-rus.ru/gw", "model": DEFAULT_LLM,
+                    "docs": "https://github.com/yakden/ai-media-stack/blob/main/docs/API.md"}}
+
+
+@app.post("/admin/launch")
+def add_launch(payload: dict, authorization: str = Header(None), x_admin_key: str = Header(None)):
+    _admin(authorization, x_admin_key)
+    t, u = (payload.get("title") or "").strip(), (payload.get("url") or "").strip()
+    if not t or not u:
+        raise HTTPException(400, "нужны title и url")
+    c = _load(LAUNCH_F, [])
+    c.append({"title": t, "url": u, "desc": (payload.get("desc") or "").strip()})
+    _save(LAUNCH_F, c)
+    return {"ok": True}
+
+
+@app.post("/admin/launch/delete")
+def del_launch(payload: dict, authorization: str = Header(None), x_admin_key: str = Header(None)):
+    _admin(authorization, x_admin_key)
+    i = int(payload.get("index", -1))
+    c = _load(LAUNCH_F, [])
+    if 0 <= i < len(c):
+        c.pop(i)
+        _save(LAUNCH_F, c)
+    return {"ok": True}
+
+
+@app.get("/admin/models")
+def admin_models(authorization: str = Header(None), x_admin_key: str = Header(None)):
+    """Installed Ollama models + which are allowed for the API + any running pulls."""
+    _admin(authorization, x_admin_key)
+    try:
+        tags = httpx.get(f"{OLLAMA}/api/tags", timeout=8).json().get("models", [])
+    except Exception:
+        tags = []
+    allowed = _allowed_models()
+    installed = [{"name": t.get("name"), "size_gb": round(int(t.get("size", 0)) / 1e9, 1),
+                  "allowed": t.get("name") in allowed} for t in tags]
+    with _pull_lock:
+        pulls = dict(_PULLS)
+    return {"installed": installed, "allowed": allowed, "builtin": list(LLM_MODELS),
+            "default": DEFAULT_LLM, "pulls": pulls}
+
+
+@app.post("/admin/models/pull")
+def models_pull(payload: dict, authorization: str = Header(None), x_admin_key: str = Header(None)):
+    """Download a new model into Ollama (background) — e.g. 'hf.co/<repo>:<quant>' or 'qwen2.5:7b'.
+    On success it's auto-added to the allowlist so it becomes selectable via the API."""
+    _admin(authorization, x_admin_key)
+    name = (payload.get("name") or "").strip()
+    if not name:
+        raise HTTPException(400, "укажи имя модели")
+    threading.Thread(target=_do_pull, args=(name, (payload.get("description") or "").strip()), daemon=True).start()
+    return {"ok": True, "started": name}
+
+
+@app.post("/admin/models/allow")
+def models_allow(payload: dict, authorization: str = Header(None), x_admin_key: str = Header(None)):
+    """Toggle whether an installed model is selectable via the API (allowlist)."""
+    _admin(authorization, x_admin_key)
+    name = (payload.get("name") or "").strip()
+    allow = bool(payload.get("allow", True))
+    ex = _load(MODELS_F, {})
+    if allow:
+        ex[name] = (payload.get("description") or "").strip() or "пользовательская модель"
+    else:
+        ex.pop(name, None)
+    _save(MODELS_F, ex)
+    return {"ok": True, "allowed": name in _allowed_models()}
+
+
 @app.get("/admin/usage")
 def all_usage(authorization: str = Header(None), x_admin_key: str = Header(None)):
     _admin(authorization, x_admin_key)
@@ -999,6 +1120,8 @@ def admin_ui():
 @app.get("/health")
 def health():
     return {"status": "ok"}
+
+
 
 
 
@@ -1052,6 +1175,11 @@ label.fld{flex:1;min-width:130px}label.fld>span{display:block;color:var(--mut);f
 #toast.show{opacity:1;transform:translateX(-50%) translateY(0)}
 .keyout{background:#0b1a10;border:1px solid #2a5a3a;border-radius:11px;padding:10px;margin-top:8px;display:none}
 canvas{width:100%;height:46px;display:block;margin-top:10px}
+.lgrid{display:grid;grid-template-columns:repeat(auto-fill,minmax(150px,1fr));gap:10px}
+.tile{display:block;text-decoration:none;color:inherit;background:var(--card2);border:1px solid var(--line);border-radius:14px;padding:13px;transition:.12s;position:relative}
+.tile:hover{border-color:var(--acc);transform:translateY(-2px)}
+.tile b{display:block;font-size:14px}.tile .d{color:var(--mut);font-size:12px;margin-top:4px}.tile .go{color:var(--acc);font-size:12px;margin-top:8px}
+pre{background:#0b0e13;border:1px solid var(--line);border-radius:10px;padding:10px;overflow:auto;font-size:12px}
 a{color:var(--acc)}
 @media(max-width:680px){
   nav#nav{position:fixed;top:auto;bottom:0;left:0;right:0;max-width:none;border-top:1px solid var(--line);border-bottom:0;background:rgba(12,15,20,.96);padding:6px 8px calc(6px + env(safe-area-inset-bottom))}
@@ -1063,6 +1191,7 @@ a{color:var(--acc)}
 <div class=hdr><div class=brand>🛠️ AI-платформа · Админ</div><span id=conn class=badge><span class=dot></span>…</span></div>
 <nav id=nav>
   <button data-tab=overview class=on><span class=ic>📊</span><span>Обзор</span></button>
+  <button data-tab=launch><span class=ic>🚀</span><span>Запуск</span></button>
   <button data-tab=services><span class=ic>🧩</span><span>Сервисы</span></button>
   <button data-tab=keys><span class=ic>🔑</span><span>Ключи</span></button>
   <button data-tab=activity><span class=ic>🕒</span><span>Активность</span></button>
@@ -1084,6 +1213,39 @@ a{color:var(--acc)}
   <div class=card>
     <h3>🖥️ Система</h3>
     <div id=sys class=grid style=margin-top:10px></div>
+  </div>
+</section>
+
+<section id=launch class=tab hidden>
+  <div class=card>
+    <h3>🚀 Открыть инструменты</h3>
+    <div id=launchpad class=lgrid style=margin-top:11px></div>
+  </div>
+  <div class=card>
+    <h3>🔌 Быстрое подключение (API)</h3>
+    <div id=connect style=margin-top:9px></div>
+  </div>
+  <div class=card>
+    <div class=hd><h3>🧠 Модели</h3><button class="ghost sm" onclick=loadModels()>↻ Обновить</button></div>
+    <div class=kcard style=margin-top:10px>
+      <div class=mut sml style=margin-bottom:7px>Добавить модель в Ollama. Имя: <span class=mono>hf.co/&lt;repo&gt;:&lt;quant&gt;</span> или из библиотеки Ollama (<span class=mono>qwen2.5:7b</span>). После загрузки станет доступна в API.</div>
+      <div class=row>
+        <label class=fld><span>имя модели</span><input id=mdlName placeholder="hf.co/...:Q4_K_M"></label>
+        <label class=fld><span>описание (необяз.)</span><input id=mdlDesc placeholder="для чего"></label>
+      </div>
+      <div class=acts><button class=p style=flex:1 onclick=pullModel()>⬇ Скачать и добавить</button></div>
+      <div id=pulls style=margin-top:8px></div>
+    </div>
+    <div id=models-list style=margin-top:6px></div>
+  </div>
+  <div class=card>
+    <h3>🔗 Свои ссылки на сервисы</h3>
+    <div class=mut sml style=margin-top:4px>Добавь ссылку на любой свой сервис — появится выше в «Открыть инструменты».</div>
+    <div class=row style=margin-top:9px>
+      <label class=fld><span>название</span><input id=lkTitle placeholder="🔧 Мой сервис"></label>
+      <label class=fld><span>URL</span><input id=lkUrl placeholder="https://..."></label>
+    </div>
+    <div class=acts><button class=p style=flex:1 onclick=addLink()>+ Добавить ссылку</button></div>
   </div>
 </section>
 
@@ -1246,9 +1408,42 @@ async function loadActivity(){let s;try{s=await(await api('/admin/activity?limit
 }
 function moreRecent(){RLIMIT=Math.min(200,RLIMIT+20);loadActivity();}
 
+// ---- LAUNCH (использование / подключение / модели) ----
+async function loadLaunch(){let d;try{d=await(await api('/admin/launch')).json();setConn(true);}catch(e){return;}
+  const tools=[...d.builtin.map(t=>({...t})), ...d.custom.map((c,i)=>({...c,ci:i}))];
+  $('#launchpad').innerHTML=tools.map(t=>'<a class=tile href="'+esc(t.url)+'" target=_blank rel=noopener><b>'+esc(t.title)+'</b><div class=d>'+esc(t.desc||'')+'</div><div class=go>Открыть ↗'+(t.ci!==undefined?' · <span style=color:var(--bad) onclick="event.preventDefault();event.stopPropagation();delLink('+t.ci+')">убрать</span>':'')+'</div></a>').join('');
+  const a=d.api;const ex='curl -X POST '+a.base+'/v1/translate \\\n  -H "X-API-Key: <ВАШ_КЛЮЧ>" -H "Content-Type: application/json" \\\n  -d \'{"text":"Привет","to":"English","model":"'+a.model+'"}\'';
+  $('#connect').innerHTML=
+    '<div class=stat><div class=mut>Base URL · авторизация</div><b class=mono style=font-size:13px>'+esc(a.base)+'</b><div class=mut>заголовок: X-API-Key</div></div>'+
+    '<pre id=curlex>'+esc(ex)+'</pre>'+
+    '<div class=acts><button class=sm onclick=copyCurl()>⧉ Копировать пример</button><a href="'+esc(a.docs)+'" target=_blank rel=noopener style=flex:1><button class="sm ghost" style=width:100%>📖 Документация API</button></a></div>'+
+    '<div class=mut sml style=margin-top:8px>Ключ выдаётся во вкладке 🔑 Ключи. Один ключ — все сервисы. Модель по умолчанию: <b>'+esc(a.model)+'</b>.</div>';
+  loadModels();
+}
+function copyCurl(){copy($('#curlex').textContent);}
+async function loadModels(){let d;try{d=await(await api('/admin/models')).json();}catch(e){return;}
+  const pulls=Object.entries(d.pulls||{}).map(([n,p])=>{const ic=p.status==='pulling'?'⏳':(p.status==='done'?'✓':'✗');return '<div class="mut sml">'+ic+' '+esc(n)+' — '+esc(p.status)+(p.status==='error'?' ('+esc(p.msg)+')':'')+'</div>';}).join('');
+  $('#pulls').innerHTML=pulls;
+  $('#models-list').innerHTML=d.installed.map(m=>{
+    const bi=(d.builtin||[]).includes(m.name);
+    const ctrl=bi?'<span class="badge sml">✓ встроена</span>'
+      :'<button class="sm'+(m.allowed?' p':'')+'" onclick="toggleModel(\''+m.name.replace(/'/g,"")+'\','+(!m.allowed)+')">'+(m.allowed?'✓ в API':'включить')+'</button>';
+    return '<div class=svc><span class=nm>'+esc(m.name)+'<div class="mut sml">'+m.size_gb+' ГБ'+(m.name===d.default?' · по умолчанию':'')+'</div></span><span class=acts>'+ctrl+'</span></div>';
+  }).join('');
+}
+async function pullModel(){const n=$('#mdlName').value.trim();if(!n){toast('Укажи имя модели');return;}
+  try{await api('/admin/models/pull',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({name:n,description:$('#mdlDesc').value.trim()})});
+  toast('Загрузка началась: '+n);$('#mdlName').value='';$('#mdlDesc').value='';setTimeout(loadModels,800);}catch(e){toast('ошибка');}}
+async function toggleModel(name,allow){try{await api('/admin/models/allow',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({name:name,allow:allow})});
+  toast(allow?'Модель включена в API':'Модель исключена');loadModels();}catch(e){toast('ошибка');}}
+async function addLink(){const t=$('#lkTitle').value.trim(),u=$('#lkUrl').value.trim();if(!t||!u){toast('Нужны название и URL');return;}
+  try{await api('/admin/launch',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({title:t,url:u})});
+  $('#lkTitle').value='';$('#lkUrl').value='';toast('Ссылка добавлена');loadLaunch();}catch(e){toast('ошибка');}}
+async function delLink(i){try{await api('/admin/launch/delete',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({index:i})});toast('Убрано');loadLaunch();}catch(e){}}
+
 // ---- dispatcher ----
-function load(){if(TAB==='overview')loadOverview();else if(TAB==='services')loadServices();else if(TAB==='keys')loadKeys();else if(TAB==='activity')loadActivity();}
-setInterval(()=>{if(TAB==='overview')loadOverview();else if(TAB==='services')loadServices();else if(TAB==='activity')loadActivity();},3000);
+function load(){if(TAB==='overview')loadOverview();else if(TAB==='launch')loadLaunch();else if(TAB==='services')loadServices();else if(TAB==='keys')loadKeys();else if(TAB==='activity')loadActivity();}
+setInterval(()=>{if(TAB==='overview')loadOverview();else if(TAB==='services')loadServices();else if(TAB==='activity')loadActivity();else if(TAB==='launch')loadModels();},3000);
 setInterval(()=>{if(TAB==='keys')loadKeys();},9000);
 setInterval(()=>$('#clock').textContent=new Date().toLocaleTimeString(),1000);
 load();
