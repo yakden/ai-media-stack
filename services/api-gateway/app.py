@@ -490,17 +490,34 @@ def _pick_model(payload):
 BROKER_LLM = {"translategemma:12b"}
 
 
-def _gen(model, prompt, options=None, timeout=600):
+def _gen(model, prompt, options=None, timeout=200):
     """Run an Ollama generate. Heavy models route through the broker (/api/llm) so they
-    get the full GPU; light models hit Ollama directly. Returns the Ollama JSON dict."""
+    get the full GPU; light models hit Ollama directly. Returns the Ollama JSON dict.
+    For the broker route we BOUND everything: the broker fails fast with 503 when the GPU
+    slot is busy, and we retry a few times with backoff instead of blocking forever — this
+    is what stops concurrent bursts from piling up into hung sessions (2026-06-11 incident)."""
     body = {"model": model, "prompt": prompt, "stream": False, "keep_alive": "5m",
             "options": options or {"temperature": 0.2}}
-    if model in BROKER_LLM:
-        r = httpx.post(f"{BROKER}/api/llm", json=body, timeout=timeout)
-    else:
+    if model not in BROKER_LLM:
         r = httpx.post(f"{OLLAMA}/api/generate", json=body, timeout=timeout)
-    r.raise_for_status()
-    return r.json()
+        r.raise_for_status()
+        return r.json()
+    # broker route: retry on 503 (GPU busy) with backoff, bounded total wait
+    last = None
+    for attempt in range(5):
+        try:
+            r = httpx.post(f"{BROKER}/api/llm", json=body, timeout=timeout)
+        except httpx.HTTPError as exc:
+            last = exc
+            time.sleep(2)
+            continue
+        if r.status_code == 503:          # GPU busy with another translation — back off
+            last = "broker busy (503)"
+            time.sleep(2 + attempt * 2)
+            continue
+        r.raise_for_status()
+        return r.json()
+    raise HTTPException(503, f"translation model busy, retry shortly ({last})")
 
 
 def _tr_one(text, to, model=DEFAULT_LLM):
@@ -812,6 +829,10 @@ def admin_activity(limit: int = 20, authorization: str = Header(None), x_admin_k
                            key=lambda j: j.get("position") or 0)
     now = time.time()
     with _inflight_lock:
+        # prune zombies: any request older than the max request timeout (~200s) can't still
+        # be running — drop it so the dashboard never shows phantom "hung" sessions.
+        for rid in [k for k, v in _INFLIGHT.items() if now - v["started"] > 240]:
+            _INFLIGHT.pop(rid, None)
         out["inflight"] = sorted(
             ({"owner": v["owner"], "service": v["service"], "elapsed": round(now - v["started"], 1)}
              for v in _INFLIGHT.values()), key=lambda x: -x["elapsed"])

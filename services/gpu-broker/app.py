@@ -995,26 +995,38 @@ def api_llm(payload: dict):
     model = (payload or {}).get("model")
     if not model:
         raise HTTPException(400, "model required")
-    with _llm_lock:
-        # don't yank the GPU out from under a running broker job — wait for it to finish
-        for _ in range(2400):
+    # FAIL FAST under contention: only one heavy LLM call holds the GPU at a time. If we
+    # can't get the slot quickly, return 503 (busy) instead of blocking forever — this is
+    # what prevents a burst of concurrent requests from piling up and exhausting the
+    # threadpool (the 2026-06-11 hang). Callers should retry with backoff.
+    if not _llm_lock.acquire(timeout=25):
+        raise HTTPException(503, "GPU busy with another translation; retry shortly")
+    try:
+        # don't yank the GPU out from under a running broker (3D) job — wait briefly, then give up
+        waited = 0.0
+        while waited < 60:
             with _lock:
                 busy = any(_jobs[j]["status"] == "running" for j in _order)
             if not busy:
                 break
             time.sleep(0.5)
+            waited += 0.5
+        else:
+            raise HTTPException(503, "GPU busy with a render/3D job; retry shortly")
         _swap_to("llm")                       # stop everything else -> full GPU
         _state["idle_since"] = time.time()
         try:
             body = {**payload, "stream": False}
             body.setdefault("keep_alive", "5m")
-            r = httpx.post(OLLAMA + "/api/generate", json=body, timeout=600)
+            r = httpx.post(OLLAMA + "/api/generate", json=body, timeout=180)
             r.raise_for_status()
             return JSONResponse(r.json())
         except httpx.HTTPError as exc:
             raise HTTPException(502, f"llm error: {exc}")
         finally:
             _state["idle_since"] = time.time()  # start the idle clock -> duty restored in ~25s
+    finally:
+        _llm_lock.release()
 
 
 @app.get("/api/state")
