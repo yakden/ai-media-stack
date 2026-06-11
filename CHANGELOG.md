@@ -4,6 +4,24 @@ All notable changes to this project are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/), and this project
 adheres to [Semantic Versioning](https://semver.org/).
 
+## [1.3.0] — 2026-06-11
+
+### Added
+- **Analytical People dashboard** — the auto cross-camera unique-people layer (person `Identity`)
+  is now a face-first analytics view: KPI cards (unique people / new today / seen today & 7d /
+  sightings), sightings-by-hour + per-camera charts, a face-first gallery (search · filter ·
+  sort), and a detail modal with a face gallery, cross-camera **sightings timeline**, dwell and
+  inline rename. Manual photo-enrollment folded in. New `GET /api/identities/analytics`
+  aggregates + `face_thumb_url` on identity list items.
+- Re-ID ops tooling: `scripts/consolidate_identities.py` (collapse over-split duplicate identities
+  of one person), `scripts/calibrate_thresholds.py`, `scripts/enroll_person.py`.
+
+### Fixed
+- **Re-ID over-splitting** — a gallery polluted with duplicates made every new sighting
+  "ambiguous" → a new identity (one person split into ~90). Consolidation + lower appearance
+  match thresholds/margin restore merging. Faceless back/low-light crops stay inherently hard —
+  good face enrollment is the durable fix.
+
 ## [1.2.1] — 2026-06-11
 
 ### Changed

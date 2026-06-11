@@ -152,7 +152,10 @@ const views = {
     render: () => (window.Faces ? window.Faces.render() : Promise.resolve()),
     teardown: () => { if (window.Faces && window.Faces.teardown) window.Faces.teardown(); },
   },
-  people: { render: renderPeople },
+  people: {
+    render: () => (window.People ? window.People.render() : Promise.resolve()),
+    teardown: () => { if (window.People && window.People.teardown) window.People.teardown(); },
+  },
 };
 let currentView = null;
 

@@ -107,6 +107,19 @@ def _rep_thumb_url(identity) -> Optional[str]:
     return None
 
 
+def _best_face_url(db: Session, identity_id: int) -> Optional[str]:
+    """URL of this identity's highest-quality face crop (face-first people gallery)."""
+    try:
+        from ..db.models import FaceSample
+        fid = db.scalar(
+            select(FaceSample.id).where(FaceSample.identity_id == identity_id)
+            .order_by(FaceSample.quality.desc()).limit(1)
+        )
+        return f"/api/face-groups/samples/{int(fid)}/thumbnail" if fid else None
+    except Exception:
+        return None
+
+
 def _identity_list_item(db: Session, identity) -> schemas.IdentityListItem:
     color = color_hex = make = vehicle_type = None
     attrs = getattr(identity, "attributes", None)
@@ -135,6 +148,7 @@ def _identity_list_item(db: Session, identity) -> schemas.IdentityListItem:
         last_seen=getattr(identity, "last_seen", None),
         cameras=_identity_cameras(db, identity.id),
         rep_thumb_url=_rep_thumb_url(identity),
+        face_thumb_url=_best_face_url(db, identity.id),
         created_at=getattr(identity, "created_at", None),
     )
 
@@ -472,6 +486,78 @@ def list_identities(
     identities = db.scalars(stmt).all()
     items = [_identity_list_item(db, ident) for ident in identities]
     return schemas.IdentityList(total=total, items=items)
+
+
+@router.get("/analytics")
+def identities_analytics(
+    object_class: str = Query("person", description="Aggregate this object class"),
+    db: Session = Depends(get_db),
+):
+    """Aggregates for the People analytics dashboard (read-only, indexed queries)."""
+    import datetime as _dt
+    m = _models()
+    from ..db.models import Camera
+    try:
+        from ..db.models import PresenceSegment
+    except Exception:
+        PresenceSegment = None
+
+    now = _dt.datetime.utcnow()
+    today0 = _dt.datetime(now.year, now.month, now.day)
+    day_start = now - _dt.timedelta(hours=24)
+    week_start = now - _dt.timedelta(days=7)
+    idf = m.Identity.object_class == object_class
+    sf = m.Sighting.object_class == object_class
+
+    def _c(stmt):
+        return int(db.scalar(stmt) or 0)
+
+    total = _c(select(func.count()).select_from(m.Identity).where(idf))
+    named = _c(select(func.count()).select_from(m.Identity).where(idf, m.Identity.is_named.is_(True)))
+    created_today = _c(select(func.count()).select_from(m.Identity).where(idf, m.Identity.created_at >= today0))
+    total_sightings = _c(select(func.count()).select_from(m.Sighting).where(sf))
+    seen_today = _c(select(func.count(func.distinct(m.Sighting.identity_id))).where(sf, m.Sighting.ts >= today0))
+    seen_7d = _c(select(func.count(func.distinct(m.Sighting.identity_id))).where(sf, m.Sighting.ts >= week_start))
+
+    cam_names = {c.id: c.name for c in db.scalars(select(Camera)).all()}
+    dwell = {}
+    if PresenceSegment is not None:
+        try:
+            for cid, sec in db.execute(
+                select(PresenceSegment.camera_id, func.avg(PresenceSegment.seconds))
+                .where(PresenceSegment.object_class == object_class)
+                .group_by(PresenceSegment.camera_id)).all():
+                dwell[cid] = float(sec or 0.0)
+        except Exception:
+            pass
+    by_camera = []
+    for cid, scount, icount in db.execute(
+            select(m.Sighting.camera_id, func.count(), func.count(func.distinct(m.Sighting.identity_id)))
+            .where(sf).group_by(m.Sighting.camera_id)).all():
+        by_camera.append({"camera_id": cid, "camera_name": cam_names.get(cid, f"#{cid}"),
+                          "sightings": int(scount), "people": int(icount),
+                          "avg_dwell_s": round(dwell.get(cid, 0.0), 1)})
+    by_camera.sort(key=lambda x: -x["sightings"])
+
+    hours = [0] * 24
+    for (ts,) in db.execute(select(m.Sighting.ts).where(sf, m.Sighting.ts >= day_start)).all():
+        try:
+            hours[ts.hour] += 1
+        except Exception:
+            pass
+    by_hour = [{"hour": h, "sightings": hours[h]} for h in range(24)]
+
+    by_match = {str(k): int(v) for k, v in db.execute(
+        select(m.Sighting.match_kind, func.count()).where(sf)
+        .group_by(m.Sighting.match_kind)).all() if k}
+
+    return {
+        "object_class": object_class,
+        "summary": {"total_people": total, "named": named, "unnamed": total - named,
+                    "created_today": created_today, "seen_today": seen_today,
+                    "seen_7d": seen_7d, "total_sightings": total_sightings},
+        "by_camera": by_camera, "by_hour": by_hour, "by_match_kind": by_match,
+    }
 
 
 @router.get("/{identity_id}", response_model=schemas.IdentityDetail)

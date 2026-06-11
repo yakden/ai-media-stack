@@ -1,0 +1,62 @@
+/* VMS People analytics — face-first cross-camera people dashboard */
+#view-people { padding: 4px 0 40px; }
+.ppl-head { display: flex; align-items: center; justify-content: space-between; gap: 12px; flex-wrap: wrap; margin: 4px 2px 14px; }
+.ppl-head h2 { margin: 0; font-size: 19px; }
+
+.ppl-kpis { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 10px; margin-bottom: 14px; }
+.ppl-kpi { background: #161b22; border: 1px solid #2a323d; border-radius: 14px; padding: 13px 15px; }
+.ppl-kpi-v { font-size: 26px; font-weight: 700; line-height: 1.1; }
+.ppl-kpi-l { color: #8b97a7; font-size: 13px; margin-top: 3px; }
+.ppl-kpi-s { color: #6b7682; font-size: 11px; margin-top: 2px; }
+
+.ppl-charts { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; margin-bottom: 14px; }
+.ppl-card { background: #161b22; border: 1px solid #2a323d; border-radius: 14px; padding: 13px 15px; }
+.ppl-card-t { color: #8b97a7; font-size: 13px; margin-bottom: 10px; }
+.ppl-muted { color: #6b7682; font-size: 13px; }
+.ppl-hbars { display: flex; align-items: flex-end; gap: 3px; height: 64px; }
+.ppl-hbar { flex: 1; height: 100%; display: flex; align-items: flex-end; background: #0b0e13; border-radius: 3px; overflow: hidden; }
+.ppl-hbar > i { display: block; width: 100%; min-height: 2px; background: linear-gradient(180deg, #4f8cff, #2b5fb3); }
+.ppl-crow { display: flex; align-items: center; gap: 8px; margin: 7px 0; font-size: 13px; }
+.ppl-cname { width: 86px; flex: none; color: #e6edf3; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.ppl-cbar { flex: 1; height: 8px; background: #0b0e13; border-radius: 5px; overflow: hidden; }
+.ppl-cbar > i { display: block; height: 100%; background: linear-gradient(90deg, #2ecc71, #7be0a0); }
+.ppl-cval { color: #8b97a7; font-size: 12px; white-space: nowrap; }
+
+.ppl-controls { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; margin-bottom: 12px; }
+.ppl-controls input, .ppl-controls select { background: #0b0e13; border: 1px solid #2a323d; color: #e6edf3; padding: 9px 11px; border-radius: 10px; font-size: 14px; }
+.ppl-controls input[type=search] { flex: 1; min-width: 160px; }
+
+.ppl-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(150px, 1fr)); gap: 12px; }
+.ppl-pcard { background: #161b22; border: 1px solid #2a323d; border-radius: 14px; overflow: hidden; cursor: pointer; transition: .12s; }
+.ppl-pcard:hover { border-color: #4f8cff; transform: translateY(-2px); }
+.ppl-face { width: 100%; aspect-ratio: 1/1; object-fit: cover; background: #0b0e13; display: block; }
+.ppl-noface { display: flex; align-items: center; justify-content: center; color: #3a434f; font-size: 40px; }
+.ppl-pinfo { padding: 9px 11px; }
+.ppl-pname { font-weight: 600; font-size: 14px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.ppl-pname.named { color: #7be0a0; }
+.ppl-pbadges { display: flex; gap: 6px; margin: 6px 0 4px; }
+.ppl-pbadges .badge { font-size: 11px; }
+.ppl-pmeta { color: #6b7682; font-size: 11px; }
+
+/* detail modal */
+.ppl-detail .ppl-drow { display: flex; gap: 8px; margin-bottom: 12px; }
+.ppl-rename { flex: 1; background: #0b0e13; border: 1px solid #2a323d; color: #e6edf3; padding: 10px 12px; border-radius: 10px; font-size: 15px; }
+.ppl-sect { color: #8b97a7; font-size: 13px; font-weight: 600; margin: 16px 0 8px; }
+.ppl-facestrip { display: flex; gap: 8px; overflow-x: auto; padding-bottom: 4px; }
+.ppl-fthumb { width: 84px; height: 84px; flex: none; object-fit: cover; border-radius: 10px; background: #0b0e13; }
+.ppl-timeline { max-height: 320px; overflow-y: auto; }
+.ppl-tlrow { display: flex; align-items: center; gap: 10px; padding: 7px 2px; border-bottom: 1px solid #222a35; font-size: 13px; }
+.ppl-tlrow:last-child { border: 0; }
+.ppl-tlthumb { width: 40px; height: 40px; flex: none; object-fit: cover; border-radius: 8px; background: #0b0e13; }
+.ppl-tlcam { font-weight: 600; }
+.ppl-tlkind { font-size: 10px; }
+.ppl-tltime { margin-left: auto; color: #8b97a7; white-space: nowrap; }
+.ppl-dactions { margin-top: 16px; display: flex; justify-content: flex-end; }
+.ppl-enroll input { display: block; width: 100%; margin: 8px 0; background: #0b0e13; border: 1px solid #2a323d; color: #e6edf3; padding: 10px 12px; border-radius: 10px; }
+.ppl-hint { color: #8b97a7; font-size: 13px; }
+.ppl-enroll-status { color: #7be0a0; font-size: 13px; margin-top: 8px; }
+
+@media (max-width: 640px) {
+  .ppl-charts { grid-template-columns: 1fr; }
+  .ppl-grid { grid-template-columns: repeat(auto-fill, minmax(120px, 1fr)); }
+}

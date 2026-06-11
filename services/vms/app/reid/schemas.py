@@ -41,6 +41,7 @@ class IdentityListItem(BaseModel):
     last_seen: Optional[datetime] = None
     cameras: List[int] = Field(default_factory=list)
     rep_thumb_url: Optional[str] = None
+    face_thumb_url: Optional[str] = None  # best-quality face crop (people gallery)
     created_at: Optional[datetime] = None
 
 
