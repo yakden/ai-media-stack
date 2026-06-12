@@ -4,6 +4,27 @@ All notable changes to this project are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/), and this project
 adheres to [Semantic Versioning](https://semver.org/).
 
+## [1.4.0] — 2026-06-12
+
+### Added
+- **Adaptive detection cadence (VMS).** Each camera now detects at full rate only
+  while objects are present, then throttles to `detect_interval_idle` once the
+  scene has been empty for `active_grace_seconds`. The live-preview frame slot
+  follows the same active/idle state (`active_preview_fps` / `idle_preview_fps`)
+  instead of re-encoding a JPEG for every decoded frame — so a quiet camera stops
+  burning GPU/CPU/disk on an empty scene, and re-arms instantly when something enters.
+- **Per-frame re-identification cap (VMS).** `max_reid_per_frame` bounds how many
+  tracks are embedded per detection frame so a crowd can no longer stall the loop;
+  fresh (unassigned) tracks get priority and the fast cadence, already-identified
+  tracks refresh on the slower `reid_confident_sample_seconds` (identity is sticky).
+  This is the direct fix for the "lags when many objects appear" symptom.
+
+### Performance
+- Measured on the live box: the busy all-classes camera worker dropped from ~73% of
+  a core to ~27% with no loss of detection responsiveness; host load average fell
+  accordingly. All changes are RAM-neutral (no extra model copies) and reduce disk
+  writes — strictly safer for the co-hosted production VM.
+
 ## [1.3.5] — 2026-06-12
 
 ### Fixed

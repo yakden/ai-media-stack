@@ -73,6 +73,13 @@ class CameraWorker:
         self.pre_seconds = int(cfg.get("pre_seconds", 5))
         self.post_seconds = int(cfg.get("post_seconds", 5))
         self.detect_interval = float(cfg.get("detect_interval", 0.0))
+        # Adaptive cadence: detect at detect_interval while objects are present,
+        # then throttle to detect_interval_idle after the scene stays empty for
+        # active_grace_seconds. Preview fps follows the same active/idle state.
+        self.detect_interval_idle = float(cfg.get("detect_interval_idle", 0.5))
+        self.active_grace_seconds = float(cfg.get("active_grace_seconds", 3.0))
+        self.active_preview_fps = float(cfg.get("active_preview_fps", 10.0))
+        self.idle_preview_fps = float(cfg.get("idle_preview_fps", 2.0))
         self.trigger_cooldown = float(cfg.get("trigger_cooldown", 30.0))
         self.min_trigger_frames = int(cfg.get("min_trigger_frames", 3))
         self.face_threshold = float(cfg.get("face_match_threshold", 0.35))
@@ -90,6 +97,10 @@ class CameraWorker:
         self.track_iou = float(cfg.get("track_iou", 0.3))
         self.track_gap_seconds = float(cfg.get("track_gap_seconds", 3.0))
         self.reid_sample_seconds = float(cfg.get("reid_sample_seconds", 3.0))
+        # Re-embed already-identified tracks less often than fresh ones, and cap
+        # how many tracks are (re-)identified per frame so a crowd can't stall us.
+        self.reid_confident_sample_seconds = float(cfg.get("reid_confident_sample_seconds", 9.0))
+        self.max_reid_per_frame = int(cfg.get("max_reid_per_frame", 4))
         self.min_track_frames = int(cfg.get("min_track_frames", 2))
         # Min face quality (det_score * frontalness) to feed a face into the
         # per-track face template (drops hard profiles / blurry faces).
@@ -113,6 +124,10 @@ class CameraWorker:
         self._consecutive_person_frames = 0
         self._last_trigger_ts = 0.0
         self._active_trigger = False
+        # Adaptive-cadence state.
+        self._last_activity_ts = 0.0   # last time a trigger object was seen
+        self._last_frame_write = 0.0   # last time the live preview slot was written
+        self._last_boxes: list = []    # boxes to re-draw on frames we didn't detect
 
         # Lazily-built components (constructed inside run() so import/CUDA cost
         # is paid in the child process).
@@ -513,16 +528,25 @@ class CameraWorker:
             self._tick_fps()
             self._heartbeat(STATE_ONLINE, last_seen=now)
 
-            # Throttle detection if configured (saves GPU on high-fps streams).
+            # Adaptive cadence: detect at the full (active) interval while objects
+            # are present, then throttle to the idle interval once the scene has
+            # been empty for active_grace_seconds. Directly cuts GPU/CPU/disk on
+            # quiet cameras while never missing the moment something enters.
+            active = (now - self._last_activity_ts) < self.active_grace_seconds
+            interval = self.detect_interval if active else self.detect_interval_idle
             boxes = []
             did_detect = False
-            if self.detect_interval <= 0 or (now - last_detect) >= self.detect_interval:
+            if interval <= 0 or (now - last_detect) >= interval:
                 last_detect = now
                 boxes = self._safe_detect(frame)
                 did_detect = True
 
             # Keep only the object classes this camera records on.
             trig_boxes = [b for b in boxes if b.label in self.trigger_classes]
+            if did_detect:
+                self._last_boxes = trig_boxes
+                if trig_boxes:
+                    self._last_activity_ts = now  # (re)enter active mode
             # Track objects + accrue dwell time + (re-)identify (only on frames
             # where detection actually ran, so the gap timing matches cadence).
             if did_detect and self._tracker is not None:
@@ -531,7 +555,9 @@ class CameraWorker:
                 except Exception:
                     logger.exception("Camera %s: tracking/identify failed", self.camera_id)
             self._handle_detections(frame, trig_boxes, now)
-            self._write_frame_slot(frame, trig_boxes)
+            # Adaptive preview: re-encode the live slot at active/idle fps instead
+            # of every decoded frame (JPEG-encoding an empty scene was pure waste).
+            self._maybe_write_frame_slot(frame, active, now)
 
         if cap is not None:
             cap.release()
@@ -815,10 +841,24 @@ class CameraWorker:
 
         if self._pipeline is None or self._identity_manager is None:
             return
+        # Pick the tracks due for (re-)identification this frame, then cap how
+        # many we actually embed so a crowd can't stall the loop. Fresh tracks
+        # (no identity yet) get priority and the fast cadence; already-identified
+        # tracks refresh on the slower "confident" cadence (identity is sticky).
+        candidates = []
         for tr in active:
-            due = tr.identity_id is None or (now - tr.last_embed_ts) >= self.reid_sample_seconds
-            if tr.frames >= self.min_track_frames and due:
-                self._assign_track_identity(frame, tr, now)
+            if tr.frames < self.min_track_frames:
+                continue
+            if tr.identity_id is None:
+                due, prio = (now - tr.last_embed_ts) >= self.reid_sample_seconds, 0
+            else:
+                due, prio = (now - tr.last_embed_ts) >= self.reid_confident_sample_seconds, 1
+            if due:
+                candidates.append((prio, tr.last_embed_ts, tr))
+        # Unassigned first (prio 0), then oldest-waiting first.
+        candidates.sort(key=lambda c: (c[0], c[1]))
+        for _prio, _ts, tr in candidates[: self.max_reid_per_frame]:
+            self._assign_track_identity(frame, tr, now)
 
     def _assign_track_identity(self, frame, tr, now: float) -> None:
         """Embed a track's current crop and assign/refresh its identity."""
@@ -1183,6 +1223,19 @@ class CameraWorker:
                 cv2.FONT_HERSHEY_SIMPLEX, 0.5, _BOX_COLOR, 1, cv2.LINE_AA,
             )
         return annotated
+
+    def _maybe_write_frame_slot(self, frame, active: bool, now: float) -> None:
+        """Throttle live-preview writes to active/idle fps (not every frame).
+
+        Re-uses the last detection's boxes for annotation on frames where we
+        skipped detection, so the overlay doesn't flicker between passes."""
+        fps = self.active_preview_fps if active else self.idle_preview_fps
+        if fps > 0:
+            min_gap = 1.0 / fps
+            if (now - self._last_frame_write) < min_gap:
+                return
+        self._last_frame_write = now
+        self._write_frame_slot(frame, self._last_boxes)
 
     def _write_frame_slot(self, frame, boxes: list) -> None:
         import cv2

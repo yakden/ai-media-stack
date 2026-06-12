@@ -61,7 +61,20 @@ class Settings(BaseSettings):
     # Run detection every Nth decoded frame to keep GPU/CPU modest.
     detect_every_n: int = 3
     # Minimum seconds between detection passes (0 = every frame the loop reads).
+    # NB: with adaptive cadence below this acts as the *active* (object present)
+    # interval; the idle interval is used when the scene has been empty.
     detect_interval: float = 0.0
+    # --- Adaptive detection cadence ---
+    # Detect at full rate while objects are present (detect_interval), then throttle
+    # to detect_interval_idle once the scene has been empty for active_grace_seconds.
+    # Saves GPU/CPU/disk on quiet cameras without missing the moment something enters.
+    detect_interval_idle: float = 0.5
+    active_grace_seconds: float = 3.0
+    # Live-preview frame slot is re-encoded at up to this fps while active, and at
+    # idle_preview_fps when the scene is idle (avoids JPEG-encoding every decoded
+    # frame "into the void" when nobody/nothing is there).
+    active_preview_fps: float = 10.0
+    idle_preview_fps: float = 2.0
     # Optional DeepStream metadata endpoint (only used when backend=deepstream).
     deepstream_endpoint: str = ""
 
@@ -152,6 +165,14 @@ class Settings(BaseSettings):
     # spawns a NEW identity — it only attaches to an existing one by appearance
     # within a session, else is dropped. THE fix for back-view duplicate explosion.
     reid_require_face_for_new_person: bool = True
+    # How often a track is re-embedded for (re-)identification once it ALREADY
+    # has a confident identity (vs reid_sample_seconds for fresh/unassigned ones).
+    # Bigger = much less GPU/DB churn on a stable crowd; identity is sticky anyway.
+    reid_confident_sample_seconds: float = 9.0
+    # Hard cap on how many tracks are (re-)identified per detection frame, so a
+    # crowd can't stall the loop. Excess tracks defer to the next frame, oldest
+    # /unassigned first. This is the direct fix for "lags on many objects".
+    max_reid_per_frame: int = 4
     # How often the worker reloads the shared gallery from the DB.
     reid_gallery_reload_seconds: int = 30
     # How often the maintenance thread runs its decay/prune/merge pass.
