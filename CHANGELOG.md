@@ -4,6 +4,21 @@ All notable changes to this project are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/), and this project
 adheres to [Semantic Versioning](https://semver.org/).
 
+## [1.7.2] — 2026-06-13
+
+### Changed
+- **Deleting an identity now also deletes its solo event clips.** When the
+  removed person/object was the *sole* subject of an event, that event — and its
+  clip + thumbnail files — is deleted too. Events that also involve other
+  identities are preserved (shared footage); only the deleted person's link is
+  nulled. Association is computed across both the denormalized `Event.identity_id`
+  and the event's sightings, and the rule is applied per delete-set so bulk and
+  clear-all behave correctly. (Refines 1.7.1, which always kept event clips.)
+
+Verified live: deleting an identity removed its 8 solo events + clips, while a
+(synthetically) shared event survived with its clip intact and the surviving
+identity untouched.
+
 ## [1.7.1] — 2026-06-13
 
 ### Fixed

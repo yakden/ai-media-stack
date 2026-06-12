@@ -993,18 +993,12 @@ def delete_identity(
     """
     m = _models()
     identity = _get_identity_or_404(db, identity_id)
+    settings = get_settings()
 
-    # Detach from events explicitly so the denormalized link is cleared even
-    # though the column has no DB-level FK cascade (per the migration shim).
-    if hasattr(Event, "identity_id"):
-        values = {"identity_id": None}
-        if hasattr(Event, "identity_name"):
-            values["identity_name"] = None
-        db.execute(
-            update(Event).where(Event.identity_id == identity_id).values(**values)
-        )
-
-    _purge_identity_files(get_settings(), db, identity_id)
+    # Solo events (this person only) are deleted with their clip+thumb; shared
+    # events are kept and just unlinked.
+    _purge_or_detach_events(settings, db, [identity_id])
+    _purge_identity_files(settings, db, identity_id)
     db.delete(identity)  # cascades sightings + face/appearance exemplars + presence
     db.commit()
 
@@ -1012,12 +1006,58 @@ def delete_identity(
     return Response(status_code=status.HTTP_204_NO_CONTENT)
 
 
-def _detach_identity_events(db, ids: list[int]) -> None:
+def _purge_or_detach_events(settings: Settings, db: Session, delete_ids) -> None:
+    """For events tied to the identities being deleted: DELETE the event (clip +
+    thumbnail files included) only when *every* identity associated with it is in
+    the delete set — i.e. the deleted person was the sole subject; otherwise just
+    null the denormalized link so shared footage (other people) is preserved."""
+    m = _models()
+    delete_set = {int(x) for x in delete_ids}
+    if not delete_set:
+        return
+
+    # Events reachable from the deleted identities, via the denormalized link OR
+    # via any of their sightings.
+    ev_ids: set[int] = set()
     if hasattr(Event, "identity_id"):
-        values = {"identity_id": None}
-        if hasattr(Event, "identity_name"):
-            values["identity_name"] = None
-        db.execute(update(Event).where(Event.identity_id.in_(ids)).values(**values))
+        ev_ids |= {
+            int(r[0]) for r in db.execute(
+                select(Event.id).where(Event.identity_id.in_(delete_set))
+            ).all()
+        }
+    ev_ids |= {
+        int(r[0]) for r in db.execute(
+            select(m.Sighting.event_id).where(
+                m.Sighting.identity_id.in_(delete_set),
+                m.Sighting.event_id.is_not(None),
+            )
+        ).all()
+    }
+
+    for eid in ev_ids:
+        ev = db.get(Event, eid)
+        if ev is None:
+            continue
+        assoc: set[int] = set()
+        if getattr(ev, "identity_id", None) is not None:
+            assoc.add(int(ev.identity_id))
+        for (sid,) in db.execute(
+            select(m.Sighting.identity_id).where(
+                m.Sighting.event_id == eid, m.Sighting.identity_id.is_not(None)
+            )
+        ).all():
+            assoc.add(int(sid))
+
+        if assoc and assoc <= delete_set:
+            # Sole subject -> delete the event AND its media files.
+            _safe_remove(_resolve_data_path(settings, ev.clip_path))
+            _safe_remove(_resolve_data_path(settings, ev.thumb_path))
+            db.delete(ev)
+        elif getattr(ev, "identity_id", None) is not None and int(ev.identity_id) in delete_set:
+            # Shared footage -> keep it, just drop the deleted person's link.
+            ev.identity_id = None
+            if hasattr(ev, "identity_name"):
+                ev.identity_name = None
 
 
 @router.post("/bulk-delete")
@@ -1031,8 +1071,8 @@ def bulk_delete_identities(
     if not ids:
         return {"deleted": 0}
     ids = [int(i) for i in ids]
-    _detach_identity_events(db, ids)
     settings = get_settings()
+    _purge_or_detach_events(settings, db, ids)
     n = 0
     for ident in db.query(m.Identity).filter(m.Identity.id.in_(ids)).all():
         _purge_identity_files(settings, db, int(ident.id))
@@ -1063,7 +1103,7 @@ def clear_all_identities(
         batch = q.limit(200).all()
         if not batch:
             break
-        _detach_identity_events(db, [int(i.id) for i in batch])
+        _purge_or_detach_events(settings, db, [int(i.id) for i in batch])
         for ident in batch:
             _purge_identity_files(settings, db, int(ident.id))
             db.delete(ident)
