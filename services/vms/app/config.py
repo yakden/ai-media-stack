@@ -30,8 +30,10 @@ class Settings(BaseSettings):
     sso_email_header: str = "X-Email"
     sso_user_header: str = "X-User"
     # When true, requests without an SSO header AND without a valid API key are
-    # rejected. Set false for local dev where neither nginx nor a key is present.
-    auth_required: bool = False
+    # rejected. Fail-closed by default: behind the nginx SSO gateway the header
+    # is always injected, so only direct (loopback/tunnel) callers are blocked.
+    # Set AUTH_REQUIRED=false for local dev where neither nginx nor a key exists.
+    auth_required: bool = True
     # Optional bearer token for SSH-tunnel / CLI use that bypasses nginx SSO.
     api_key: str | None = None
 

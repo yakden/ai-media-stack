@@ -4,6 +4,28 @@ All notable changes to this project are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/), and this project
 adheres to [Semantic Versioning](https://semver.org/).
 
+## [1.5.2] — 2026-06-12
+
+### Security
+Third VMS hardening batch — **fail-closed authentication** (closes the HIGH
+findings). The app previously failed *open*: `auth_required` defaulted to false
+and the gateway didn't inject the identity header, so any process that could
+reach the loopback port (SSH tunnel, SSRF, co-located container) had full
+unauthenticated read/write/delete, and the SSO identity was spoofable.
+- **`auth_required` now defaults to `true`** (fail-closed). Behind the SSO
+  gateway the header is always present, so only direct/loopback callers without a
+  key are rejected (`app/config.py`).
+- **Gateway now injects the identity from the auth subrequest and overrides any
+  client-supplied header** (`auth_request_set $sso_email $upstream_http_x_auth_email;
+  proxy_set_header X-Email $sso_email;`) — the trusted email can no longer be
+  spoofed by a client. (nginx vhost; documented in `.env.example`.)
+- **Strong API key** for CLI/tunnel access, compared in constant time (added in
+  1.5.0); `.env.example` now documents generating one with `openssl rand -hex 32`.
+
+Verified live: loopback without credentials → 401, with the injected SSO header
+→ 200, with a valid bearer key → 200, bad key → 401, browser without a cookie →
+302 to login (no lockout), production VM unaffected.
+
 ## [1.5.1] — 2026-06-12
 
 ### Security
