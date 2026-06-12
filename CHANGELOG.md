@@ -4,6 +4,28 @@ All notable changes to this project are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/), and this project
 adheres to [Semantic Versioning](https://semver.org/).
 
+## [1.6.0] — 2026-06-12
+
+### Security
+Fourth VMS hardening batch — **deployment / blast-radius reduction** (compose-only,
+no image rebuild, fully reversible):
+- **Container runs unprivileged** (`user: "1000:1000"`) instead of root, so an
+  in-container write/RCE primitive can no longer tamper with host-owned files or
+  the bind-mounted source. GPU inference is unaffected — the NVIDIA device nodes
+  are world-accessible — verified still running on the T4 (not CPU fallback).
+- **All Linux capabilities dropped** (`cap_drop: [ALL]`) and **`no-new-privileges`**
+  set — this workload needs no capabilities and no child should ever escalate.
+- **Application source mounted read-only** (`./app:/app/app:ro`).
+- **Data directory tightened** to `0700` and owned by the unprivileged uid.
+
+Verified live: container runs as uid 1000, GPU inference active, recording +
+thumbnail/face writes succeed, ffmpeg runs under the dropped capabilities,
+auth remains fail-closed, and the production VM is unaffected.
+
+This completes the four-batch defensive hardening pass (1.5.0 hygiene · 1.5.1
+credential/SSRF · 1.5.2 fail-closed auth · 1.6.0 deployment) that followed a full
+multi-agent security audit.
+
 ## [1.5.2] — 2026-06-12
 
 ### Security

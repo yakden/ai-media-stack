@@ -10,6 +10,16 @@ services:
       - "127.0.0.1:8120:8120"
     env_file:
       - .env
+    # Run as the unprivileged host uid (deploy=1000) instead of root, so an
+    # in-container write/RCE primitive can't tamper with host-owned files or
+    # escalate. The GPU still works — /dev/nvidia* are world-accessible.
+    user: "1000:1000"
+    # Defense-in-depth: this workload needs no Linux capabilities, and no child
+    # should ever gain privileges (blocks setuid escalation).
+    cap_drop:
+      - ALL
+    security_opt:
+      - "no-new-privileges:true"
     volumes:
       # Single source of truth for metadata + media: vms.db (WAL), recordings,
       # thumbnails, enrollment photos, and the rolling ffmpeg segment buffer.
@@ -17,7 +27,8 @@ services:
       # YOLOv8n.onnx + insightface buffalo_l pack. Persisted across rebuilds so
       # models are downloaded once (scripts/download_models.py).
       - ./models:/app/models
-      - ./app:/app/app
+      # App code mounted read-only: the container never writes its own source.
+      - ./app:/app/app:ro
     # OpenCV/ffmpeg + multiprocessing frame slots use POSIX shared memory.
     shm_size: "512m"
     # Hard RAM cap so the VMS can NEVER push the shared host into a global OOM
