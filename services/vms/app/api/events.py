@@ -245,7 +245,7 @@ def _purge_event_files(event) -> None:
 
 @router.post("/bulk-delete")
 def bulk_delete_events(
-    ids: list[int] = Body(..., embed=True),
+    ids: list[int] = Body(..., embed=True, max_length=1000),
     db: Session = Depends(get_db),
     _: object = Depends(require_auth),
 ) -> dict:

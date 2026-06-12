@@ -4,6 +4,28 @@ All notable changes to this project are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/), and this project
 adheres to [Semantic Versioning](https://semver.org/).
 
+## [1.5.0] — 2026-06-12
+
+### Security
+First batch of a defensive security-hardening pass over the VMS service (low-risk
+hygiene; no change to the auth/SSO flow):
+- **Timing-safe API-key comparison** — the optional bearer key is now checked with
+  `hmac.compare_digest` instead of `==`, so the key can't be recovered via response
+  timing (`app/auth.py`).
+- **Decompression-bomb guard on uploads** — enrollment images are rejected if they
+  decode to more than 50 MP, and the byte cap is lowered 32 MiB → 8 MiB, so a small
+  crafted file can no longer OOM the worker (`app/api/people.py`).
+- **Path-traversal containment** — the stored-image resolver now verifies the
+  resolved path stays inside the data dir (`os.path.commonpath`) and no longer
+  trusts absolute stored paths, matching the guard already used elsewhere.
+- **Bounded request bodies (DoS)** — bulk delete/merge/split/enroll/label id-lists
+  are capped (`max_length` 1000–5000) and free-text fields (name/notes/label) get
+  `max_length`, so a single request can't blow up memory or build a giant `IN()`.
+- **Face-group clustering cap** lowered (`max_samples` 20000 → 2000) to bound the
+  O(n²) similarity matrix.
+- **Build hardening** — `setuptools`/`wheel` upgraded in the image (pins out
+  CVE-2022-40897 / CVE-2024-6345, build-time only).
+
 ## [1.4.2] — 2026-06-12
 
 ### Performance

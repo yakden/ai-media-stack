@@ -99,8 +99,8 @@ class IdentityDetail(IdentityListItem):
 class IdentityRename(BaseModel):
     """Body for PUT /api/identities/{id} — rename / annotate / confirm."""
 
-    name: Optional[str] = Field(None, min_length=1)
-    notes: Optional[str] = None
+    name: Optional[str] = Field(None, min_length=1, max_length=200)
+    notes: Optional[str] = Field(None, max_length=2000)
     # Renaming defaults is_named=True (operator intent freezes auto-merge); a
     # client may toggle it explicitly.
     is_named: Optional[bool] = None
@@ -116,7 +116,7 @@ class IdentityMergeRequest(BaseModel):
 
     target_id: int = Field(..., description="Surviving identity id")
     source_ids: List[int] = Field(
-        ..., min_length=1, description="Identities to merge into the target"
+        ..., min_length=1, max_length=1000, description="Identities to merge into the target"
     )
 
 
@@ -129,13 +129,13 @@ class IdentitySplitRequest(BaseModel):
     """
 
     sighting_ids: Optional[List[int]] = Field(
-        None, description="Sightings to move to a new identity"
+        None, max_length=5000, description="Sightings to move to a new identity"
     )
     auto: bool = Field(
         False, description="Auto re-cluster this identity into two"
     )
     new_name: Optional[str] = Field(
-        None, min_length=1, description="Optional name for the split-off identity"
+        None, min_length=1, max_length=200, description="Optional name for the split-off identity"
     )
 
 

@@ -987,7 +987,7 @@ def _detach_identity_events(db, ids: list[int]) -> None:
 
 @router.post("/bulk-delete")
 def bulk_delete_identities(
-    ids: list[int] = Body(..., embed=True),
+    ids: list[int] = Body(..., embed=True, max_length=1000),
     request: Request = None,
     db: Session = Depends(get_db),
 ) -> dict:

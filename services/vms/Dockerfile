@@ -30,7 +30,9 @@ COPY pyproject.toml ./
 # CPUExecutionProvider at runtime (detection/face/ReID fall back to CPU ≈ 7 cores/camera).
 # Drop the CPU build and reinstall the GPU build so the CUDAExecutionProvider is present —
 # this is what offloads the heavy inference to the T4.
-RUN pip3 install --upgrade pip \
+# Upgrade pip/setuptools/wheel first: pins out CVE-2022-40897 / CVE-2024-6345 in
+# the old setuptools (59.6.0) that ships with the base image (build-time only).
+RUN pip3 install --upgrade pip 'setuptools>=70.0.0' wheel \
     && pip3 install . \
     && pip3 uninstall -y onnxruntime \
     && pip3 install --force-reinstall --no-deps onnxruntime-gpu

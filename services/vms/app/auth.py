@@ -15,6 +15,7 @@ dependency degrades to an anonymous principal so the API is usable out of the bo
 
 from __future__ import annotations
 
+import hmac
 from dataclasses import dataclass
 
 from fastapi import Depends, HTTPException, Request, status
@@ -55,7 +56,8 @@ def require_user(
         return Principal(email=email, user=user or email, via="sso")
 
     token = _bearer_token(request)
-    if settings.api_key and token == settings.api_key:
+    # Constant-time compare to avoid leaking the key via response timing.
+    if settings.api_key and token and hmac.compare_digest(token, settings.api_key):
         return Principal(email=None, user="api-key", via="api_key")
 
     if not settings.auth_required:

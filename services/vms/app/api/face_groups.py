@@ -73,7 +73,7 @@ def list_face_groups(
     clothing_weight: float = Query(0.0, ge=0.0, le=1.0, description="Blend of clothing similarity"),
     min_size: int = Query(1, ge=1, le=100, description="Hide groups smaller than this"),
     max_members: int = Query(40, ge=1, le=500, description="Member thumbnails per group to return"),
-    max_samples: int = Query(4000, ge=1, le=20000, description="Cap on samples clustered"),
+    max_samples: int = Query(2000, ge=1, le=2000, description="Cap on samples clustered"),
     db: Session = Depends(get_db),
 ) -> dict:
     """Cluster captured faces and return groups (largest first)."""
@@ -159,8 +159,8 @@ def get_face_thumbnail(sample_id: int, db: Session = Depends(get_db)):
 
 @router.post("/enroll")
 def enroll_group(
-    sample_ids: list[int] = Body(..., embed=True),
-    name: str = Body(..., embed=True),
+    sample_ids: list[int] = Body(..., embed=True, max_length=5000),
+    name: str = Body(..., embed=True, max_length=200),
     request: Request = None,
     db: Session = Depends(get_db),
 ) -> dict:
@@ -210,8 +210,8 @@ def enroll_group(
 
 @router.post("/label")
 def label_group(
-    sample_ids: list[int] = Body(..., embed=True),
-    label: str = Body(..., embed=True),
+    sample_ids: list[int] = Body(..., embed=True, max_length=5000),
+    label: str = Body(..., embed=True, max_length=2000),
     db: Session = Depends(get_db),
 ) -> dict:
     """Name a group: set ``label`` on the given face samples."""

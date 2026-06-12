@@ -48,7 +48,10 @@ from .. import schemas
 router = APIRouter(prefix="/api/people", tags=["people"], dependencies=[Depends(require_auth)])
 
 # Cap upload size defensively even though nginx also enforces client_max_body_size.
-MAX_IMAGE_BYTES = 32 * 1024 * 1024
+MAX_IMAGE_BYTES = 8 * 1024 * 1024
+# Decompression-bomb guard: a small file can decode to a huge raster and OOM the
+# worker. Reject anything beyond a generous photo resolution after decode.
+MAX_IMAGE_PIXELS = 50 * 1000 * 1000  # 50 MP
 ALLOWED_CONTENT_TYPES = {
     "image/jpeg",
     "image/jpg",
@@ -120,6 +123,8 @@ def _decode_image(raw: bytes) -> np.ndarray:
     img = cv2.imdecode(arr, cv2.IMREAD_COLOR)
     if img is None:
         raise HTTPException(status_code=400, detail="Could not decode image")
+    if img.shape[0] * img.shape[1] > MAX_IMAGE_PIXELS:
+        raise HTTPException(status_code=413, detail="Image resolution too large")
     return img
 
 
@@ -254,7 +259,7 @@ def _purge_person_files(settings, db, person_id: int) -> None:
 
 @router.post("/bulk-delete")
 def bulk_delete_people(
-    ids: list[int] = Body(..., embed=True),
+    ids: list[int] = Body(..., embed=True, max_length=1000),
     request: Request = None,
     db: Session = Depends(get_db),
 ) -> dict:
@@ -517,17 +522,23 @@ def _relative_image_path(
 
 
 def _resolve_image_path(settings: Settings, stored: str | None) -> str | None:
-    """Resolve a stored (relative) image path to an absolute on-disk path."""
+    """Resolve a stored (relative) image path to an absolute on-disk path.
+
+    Containment-guarded: the result is only returned if it stays inside the data
+    dir, so a malformed/ ``..``-laden stored path can never escape (matches the
+    guard used by the other thumbnail resolvers). Absolute stored paths are no
+    longer trusted verbatim — stored paths are always relative ('data/faces/..')."""
     if not stored:
         return None
-    if os.path.isabs(stored):
-        return stored
     data_dir = os.path.abspath(_data_dir(settings))
     # Stored paths are like 'data/faces/<id>/<file>'; strip the leading 'data/'.
     norm = stored.replace("\\", "/")
     if norm.startswith("data/"):
         norm = norm[len("data/"):]
-    return os.path.join(data_dir, norm)
+    candidate = os.path.abspath(os.path.join(data_dir, norm))
+    if os.path.commonpath([candidate, data_dir]) != data_dir:
+        return None  # path-traversal attempt / escapes the data dir
+    return candidate
 
 
 def _safe_unlink(path: str | None) -> None:
