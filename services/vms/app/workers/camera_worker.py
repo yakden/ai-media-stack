@@ -116,6 +116,8 @@ class CameraWorker:
         # writes go through this one thread (serialised, avoids SQLite locks).
         self._clip_queue = None
         self._clip_thread = None
+        self._persist_queue = None
+        self._persist_thread = None
         self._tracker = None
         self._vehicle_attrs = None
         self.gallery_reload_seconds = float(cfg.get("reid_gallery_reload_seconds", 30.0))
@@ -326,6 +328,14 @@ class CameraWorker:
                     target=self._clip_drain_loop, name=f"clip-cam{self.camera_id}", daemon=True,
                 )
                 self._clip_thread.start()
+                # Background persist drain thread: all sighting/face thumbnail
+                # imwrites + their DB commits run here (batched), off the detect
+                # loop — so the hot path never blocks on JPEG-encode or fsync.
+                self._persist_queue = queue.Queue(maxsize=256)
+                self._persist_thread = threading.Thread(
+                    target=self._persist_drain_loop, name=f"persist-cam{self.camera_id}", daemon=True,
+                )
+                self._persist_thread.start()
                 # Vehicle make / body-type classifiers (NVIDIA TAO). Best-effort.
                 try:
                     from ..detect.vehicle_attrs import VehicleAttributeClassifier
@@ -460,6 +470,21 @@ class CameraWorker:
             except Exception:
                 pass
             self._clip_thread.join(timeout=20.0)
+        # Flush pending thumbnail/face-sample persist jobs, then stop that thread.
+        if (
+            self._persist_queue is not None
+            and self._persist_thread is not None
+            and self._persist_thread.is_alive()
+        ):
+            try:
+                self._persist_queue.join()
+            except Exception:
+                pass
+            try:
+                self._persist_queue.put_nowait(None)  # stop sentinel
+            except Exception:
+                pass
+            self._persist_thread.join(timeout=15.0)
         for comp in (
             self._segmenter,
             self._detector,
@@ -1000,13 +1025,10 @@ class CameraWorker:
             pass
 
     def _save_face_sample(self, frame, feat, identity_id, sighting_id, ts) -> None:
-        """Persist one captured face: thumbnail + ArcFace + clothing vectors."""
-        import cv2
-
-        from ..db.models import FaceSample
+        """Capture one face (crop + ArcFace + clothing vectors) and hand it to the
+        persist drain thread — the imwrite + DB insert happen OFF the detect loop."""
         from ..reid.gallery import serialize_vector
 
-        data_dir = Path(self.cfg.get("data_dir", "data"))
         fx1, fy1, fx2, fy2 = (int(v) for v in feat.face_bbox)
         h, w = frame.shape[:2]
         # Pad the face box ~20% for a nicer thumbnail.
@@ -1015,36 +1037,126 @@ class CameraWorker:
         fx2, fy2 = min(w, fx2 + pw), min(h, fy2 + ph)
         if fx2 <= fx1 or fy2 <= fy1:
             return
-        crop = frame[fy1:fy2, fx1:fx2]
+        # .copy(): the frame buffer is overwritten by the next cap.read().
+        crop = frame[fy1:fy2, fx1:fx2].copy()
 
+        try:
+            vec_blob = serialize_vector(feat.face_vec)
+        except Exception:
+            return
         try:
             app_blob = serialize_vector(feat.appearance_vec) if feat.appearance_vec is not None else None
         except Exception:
             app_blob = None
 
+        self._enqueue_persist({
+            "kind": "face_sample",
+            "crop": crop,
+            "vector": vec_blob,
+            "app_vector": app_blob,
+            "quality": float(getattr(feat, "face_det_score", 0.0) or 0.0),
+            "identity_id": int(identity_id) if identity_id is not None else None,
+            "sighting_id": int(sighting_id) if sighting_id is not None else None,
+            "ts": ts.replace(tzinfo=None) if getattr(ts, "tzinfo", None) else ts,
+        })
+
+    # -- non-blocking persist (thumbnails + face samples off the detect loop) --
+
+    def _enqueue_persist(self, job: dict) -> None:
+        """Queue a thumbnail/face-sample job for the drain thread. Falls back to
+        an inline write if the queue isn't up yet or is saturated (no data loss)."""
+        q = self._persist_queue
+        if q is None:
+            self._persist_now([job])
+            return
+        try:
+            q.put_nowait(job)
+        except queue.Full:
+            logger.warning("camera %s: persist queue full; writing inline", self.camera_id)
+            self._persist_now([job])
+
+    def _persist_drain_loop(self) -> None:
+        """Daemon: batch-drain queued thumbnail/face-sample jobs and commit them
+        in ONE transaction per batch — off the detection loop."""
+        while True:
+            first = self._persist_queue.get()
+            got = 1
+            jobs: list = []
+            stop = first is None
+            if first is not None:
+                jobs.append(first)
+            try:
+                while len(jobs) < 64:
+                    j = self._persist_queue.get_nowait()
+                    got += 1
+                    if j is None:
+                        stop = True
+                        break
+                    jobs.append(j)
+            except queue.Empty:
+                pass
+            try:
+                self._persist_now(jobs)
+            except Exception:
+                logger.exception("camera %s: persist drain failed", self.camera_id)
+            finally:
+                for _ in range(got):
+                    self._persist_queue.task_done()
+            if stop:
+                return
+
+    def _persist_now(self, jobs: list) -> None:
+        """Write a batch of thumbnail/face-sample jobs in a single transaction.
+
+        Shared by the drain thread (batched) and the inline fallback (one job)."""
+        if not jobs:
+            return
+        import cv2
+
+        from ..db.models import FaceSample, Sighting
+
+        data_dir = Path(self.cfg.get("data_dir", "data"))
         session = self._session()
         try:
-            fs = FaceSample(
-                camera_id=self.camera_id,
-                ts=ts.replace(tzinfo=None) if ts.tzinfo else ts,
-                vector=serialize_vector(feat.face_vec),
-                app_vector=app_blob,
-                quality=float(getattr(feat, "face_det_score", 0.0) or 0.0),
-                identity_id=int(identity_id) if identity_id is not None else None,
-                sighting_id=int(sighting_id) if sighting_id is not None else None,
-            )
-            session.add(fs)
+            # Sighting body-crop thumbnails -> Sighting.thumb_path.
+            for j in jobs:
+                if j.get("kind") != "sighting_thumb":
+                    continue
+                try:
+                    ident_dir = data_dir / "identities" / str(j["identity_id"])
+                    ident_dir.mkdir(parents=True, exist_ok=True)
+                    abs_path = ident_dir / f"{j['sighting_id']}.jpg"
+                    rel = Path("data") / "identities" / str(j["identity_id"]) / f"{j['sighting_id']}.jpg"
+                    if cv2.imwrite(str(abs_path), j["crop"], [int(cv2.IMWRITE_JPEG_QUALITY), 80]):
+                        s = session.get(Sighting, int(j["sighting_id"]))
+                        if s is not None:
+                            s.thumb_path = str(rel)
+                except Exception:
+                    logger.debug("sighting thumb persist failed", exc_info=True)
+            # Face samples: insert rows, flush to assign ids, then imwrite + path.
+            face_rows = [(FaceSample(
+                camera_id=self.camera_id, ts=j["ts"], vector=j["vector"],
+                app_vector=j["app_vector"], quality=j["quality"],
+                identity_id=j["identity_id"], sighting_id=j["sighting_id"],
+            ), j) for j in jobs if j.get("kind") == "face_sample"]
+            if face_rows:
+                samples_dir = data_dir / "face_samples"
+                samples_dir.mkdir(parents=True, exist_ok=True)
+                for fs, _j in face_rows:
+                    session.add(fs)
+                session.flush()  # assign fs.id without ending the transaction
+                for fs, j in face_rows:
+                    try:
+                        fid = int(fs.id)
+                        abs_path = samples_dir / f"{fid}.jpg"
+                        if cv2.imwrite(str(abs_path), j["crop"], [int(cv2.IMWRITE_JPEG_QUALITY), 88]):
+                            fs.thumb_path = str(Path("data") / "face_samples" / f"{fid}.jpg")
+                    except Exception:
+                        logger.debug("face sample image write failed", exc_info=True)
             session.commit()
-            fid = int(fs.id)
-            samples_dir = data_dir / "face_samples"
-            samples_dir.mkdir(parents=True, exist_ok=True)
-            abs_path = samples_dir / f"{fid}.jpg"
-            if cv2.imwrite(str(abs_path), crop, [int(cv2.IMWRITE_JPEG_QUALITY), 88]):
-                fs.thumb_path = str(Path("data") / "face_samples" / f"{fid}.jpg")
-                session.commit()
         except Exception:
             session.rollback()
-            logger.debug("face sample persist failed", exc_info=True)
+            logger.debug("persist batch failed", exc_info=True)
         finally:
             session.close()
 
@@ -1269,40 +1381,22 @@ class CameraWorker:
     def _write_sighting_thumb(
         self, snapshot, bbox: tuple[int, int, int, int], identity_id: int, sighting_id: int
     ) -> None:
-        """Crop the body box and save it as the sighting thumbnail, then record
-        the relative path on the Sighting row."""
-        import cv2
-
+        """Crop the body box and hand the thumbnail + Sighting.thumb_path update to
+        the persist drain thread (imwrite + commit happen OFF the detect loop)."""
         x1, y1, x2, y2 = bbox
         h, w = snapshot.shape[:2]
         x1, y1 = max(0, x1), max(0, y1)
         x2, y2 = min(w, x2), min(h, y2)
         if x2 <= x1 or y2 <= y1:
             return
-        crop = snapshot[y1:y2, x1:x2]
-        data_dir = Path(self.cfg.get("data_dir", "data"))
-        ident_dir = data_dir / "identities" / str(identity_id)
-        ident_dir.mkdir(parents=True, exist_ok=True)
-        rel = Path("data") / "identities" / str(identity_id) / f"{sighting_id}.jpg"
-        abs_path = ident_dir / f"{sighting_id}.jpg"
-        try:
-            cv2.imwrite(str(abs_path), crop, [int(cv2.IMWRITE_JPEG_QUALITY), 80])
-        except Exception:
-            logger.exception("Camera %s: failed to write sighting thumb %s", self.camera_id, sighting_id)
-            return
-        try:
-            from ..db.models import Sighting
-
-            session = self._session()
-            try:
-                s = session.get(Sighting, sighting_id)
-                if s is not None:
-                    s.thumb_path = str(rel)
-                    session.commit()
-            finally:
-                session.close()
-        except Exception:
-            logger.exception("Camera %s: failed to record sighting thumb path", self.camera_id)
+        # .copy(): the frame buffer is overwritten by the next cap.read().
+        crop = snapshot[y1:y2, x1:x2].copy()
+        self._enqueue_persist({
+            "kind": "sighting_thumb",
+            "crop": crop,
+            "identity_id": int(identity_id),
+            "sighting_id": int(sighting_id),
+        })
 
     # -- DB access ----------------------------------------------------------
 

@@ -4,6 +4,20 @@ All notable changes to this project are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/), and this project
 adheres to [Semantic Versioning](https://semver.org/).
 
+## [1.4.1] — 2026-06-12
+
+### Performance
+- **Thumbnail & face-sample writes moved off the detection loop (VMS).** Sighting
+  body-crop thumbnails and captured face samples are now produced on a dedicated
+  per-camera persist drain thread (mirroring the existing clip-assembly thread)
+  instead of inline in the hot path. The detect loop only copies the crop and
+  enqueues; the thread does the JPEG-encode + DB write. Jobs are **batched into a
+  single transaction** per drain cycle, collapsing the previous 2–3 separate
+  fsync'd commits per track into one and removing the per-frame disk-write stall —
+  the main cause of the "hang under many objects". A bounded queue falls back to an
+  inline write under saturation (no lost thumbnails), and pending jobs are flushed
+  on shutdown. Behaviour and on-disk layout are unchanged; only the timing moves.
+
 ## [1.4.0] — 2026-06-12
 
 ### Added
