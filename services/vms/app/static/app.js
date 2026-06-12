@@ -299,6 +299,109 @@ function openLivePlayer(cam) {
   startHls();
 }
 
+/* Shared zoom + pan for a media stage — works with MOUSE (wheel zoom, drag pan,
+ * double-click) AND TOUCH (two-finger pinch zoom, one-finger pan, double-tap).
+ * `target` is the <img>/<video> transformed inside `stage`. Returns {reset,
+ * destroy}. Used by both the live monitor and the recorded-clip viewer so the
+ * gesture feel is identical on mobile and desktop. */
+function attachZoomPan(stage, target, { min = 1, max = 6 } = {}) {
+  let scale = 1, tx = 0, ty = 0;
+  const apply = () => {
+    target.style.transform = `translate(${tx}px, ${ty}px) scale(${scale})`;
+    stage.classList.toggle("zoomed", scale > 1);
+  };
+  const reset = () => { scale = 1; tx = 0; ty = 0; apply(); };
+  const clamp = (s) => Math.min(max, Math.max(min, s));
+  const rel = (cx, cy) => {
+    const r = stage.getBoundingClientRect();
+    return [cx - r.left - r.width / 2, cy - r.top - r.height / 2];
+  };
+  // Zoom keeping the point under (cx,cy) — stage-center coords — stable.
+  const zoomTo = (next, cx, cy) => {
+    const prev = scale; scale = clamp(next);
+    const k = scale / prev;
+    tx = cx - (cx - tx) * k; ty = cy - (cy - ty) * k;
+    if (scale <= 1.001) { scale = 1; tx = 0; ty = 0; }
+    apply();
+  };
+
+  // --- mouse ---
+  const onWheel = (e) => { e.preventDefault(); const [cx, cy] = rel(e.clientX, e.clientY); zoomTo(scale * (e.deltaY < 0 ? 1.15 : 1 / 1.15), cx, cy); };
+  let dragging = false, sx = 0, sy = 0;
+  const onDown = (e) => { if (scale <= 1) return; dragging = true; sx = e.clientX - tx; sy = e.clientY - ty; stage.classList.add("panning"); e.preventDefault(); };
+  const onMove = (e) => { if (dragging) { tx = e.clientX - sx; ty = e.clientY - sy; apply(); } };
+  const onUp = () => { dragging = false; stage.classList.remove("panning"); };
+  const onDbl = (e) => { e.preventDefault(); if (scale > 1) reset(); else { const [cx, cy] = rel(e.clientX, e.clientY); zoomTo(2, cx, cy); } };
+  stage.addEventListener("wheel", onWheel, { passive: false });
+  stage.addEventListener("mousedown", onDown);
+  window.addEventListener("mousemove", onMove);
+  window.addEventListener("mouseup", onUp);
+  stage.addEventListener("dblclick", onDbl);
+
+  // --- touch ---
+  const pts = new Map();
+  let startDist = 0, startScale = 1, panStart = null, lastTap = 0;
+  const dist = (a, b) => Math.hypot(a.x - b.x, a.y - b.y);
+  const onTStart = (e) => {
+    for (const t of e.changedTouches) pts.set(t.identifier, { x: t.clientX, y: t.clientY });
+    if (pts.size === 2) {
+      const [a, b] = [...pts.values()];
+      startDist = dist(a, b); startScale = scale;
+    } else if (pts.size === 1) {
+      const t = [...pts.values()][0];
+      if (scale > 1) panStart = { x: t.x - tx, y: t.y - ty };
+      const now = Date.now();
+      if (now - lastTap < 300) {            // double-tap toggles 2× / reset
+        const [cx, cy] = rel(t.x, t.y);
+        scale > 1 ? reset() : zoomTo(2, cx, cy);
+        lastTap = 0; e.preventDefault();
+      } else { lastTap = now; }
+    }
+  };
+  const onTMove = (e) => {
+    for (const t of e.changedTouches) if (pts.has(t.identifier)) pts.set(t.identifier, { x: t.clientX, y: t.clientY });
+    if (pts.size === 2 && startDist > 0) {
+      e.preventDefault();
+      const [a, b] = [...pts.values()];
+      const [cx, cy] = rel((a.x + b.x) / 2, (a.y + b.y) / 2);
+      zoomTo(startScale * (dist(a, b) / startDist), cx, cy);
+    } else if (pts.size === 1 && scale > 1 && panStart) {
+      e.preventDefault();
+      const t = [...pts.values()][0];
+      tx = t.x - panStart.x; ty = t.y - panStart.y; apply();
+    }
+  };
+  const onTEnd = (e) => {
+    for (const t of e.changedTouches) pts.delete(t.identifier);
+    if (pts.size < 2) startDist = 0;
+    panStart = null;
+    if (pts.size === 1 && scale > 1) { const t = [...pts.values()][0]; panStart = { x: t.x - tx, y: t.y - ty }; }
+  };
+  stage.addEventListener("touchstart", onTStart, { passive: false });
+  stage.addEventListener("touchmove", onTMove, { passive: false });
+  stage.addEventListener("touchend", onTEnd);
+  stage.addEventListener("touchcancel", onTEnd);
+
+  // Re-fit when the device rotates / viewport resizes (keeps the image centered).
+  const onResize = () => reset();
+  window.addEventListener("orientationchange", onResize);
+
+  const destroy = () => {
+    window.removeEventListener("mousemove", onMove);
+    window.removeEventListener("mouseup", onUp);
+    window.removeEventListener("orientationchange", onResize);
+  };
+  return { reset, destroy };
+}
+
+/* Fullscreen that follows the device: the stage fills the screen and, on a phone,
+ * the picture rotates naturally with the handset (we don't lock orientation, so
+ * turning the phone re-lays-out the fullscreen media to fill either way). */
+function goFullscreen(stage) {
+  const req = stage.requestFullscreen || stage.webkitRequestFullscreen || stage.msRequestFullscreen;
+  if (req) { try { const p = req.call(stage); if (p && p.catch) p.catch(() => {}); } catch (_) {} }
+}
+
 /* Focused LIVE MONITOR — low-latency MJPEG (not HLS) with zoom/pan, fullscreen,
  * and a manual record button. This is the default tile action; sound (HLS) is a
  * secondary toggle since it is ~6–12 s behind and heavier. */
@@ -310,38 +413,10 @@ function openLiveMonitor(cam) {
     alt: cam.name,
     onerror: function () { this.onerror = null; this.src = `/api/live/${id}/snapshot?t=${Date.now()}`; },
   });
-  const stage = el("div", { class: "video-stage" }, img);
+  const stage = el("div", { class: "video-stage video-stage-mono" }, img);
 
-  // Zoom + pan (same model as the clip viewer), applied to the <img>.
-  let scale = 1, tx = 0, ty = 0, dragging = false, sx = 0, sy = 0;
-  const MIN = 1, MAX = 6;
-  const apply = () => {
-    img.style.transform = `translate(${tx}px, ${ty}px) scale(${scale})`;
-    stage.classList.toggle("zoomed", scale > 1);
-  };
-  const reset = () => { scale = 1; tx = 0; ty = 0; apply(); };
-  stage.addEventListener("wheel", (e) => {
-    e.preventDefault();
-    const rect = stage.getBoundingClientRect();
-    const cx = e.clientX - rect.left - rect.width / 2;
-    const cy = e.clientY - rect.top - rect.height / 2;
-    const prev = scale;
-    scale = Math.min(MAX, Math.max(MIN, scale * (e.deltaY < 0 ? 1.15 : 1 / 1.15)));
-    const k = scale / prev;
-    tx = cx - (cx - tx) * k; ty = cy - (cy - ty) * k;
-    if (scale === 1) { tx = 0; ty = 0; }
-    apply();
-  }, { passive: false });
-  stage.addEventListener("mousedown", (e) => {
-    if (scale <= 1) return;
-    dragging = true; sx = e.clientX - tx; sy = e.clientY - ty;
-    stage.classList.add("panning"); e.preventDefault();
-  });
-  const onMove = (e) => { if (dragging) { tx = e.clientX - sx; ty = e.clientY - sy; apply(); } };
-  const onUp = () => { dragging = false; stage.classList.remove("panning"); };
-  window.addEventListener("mousemove", onMove);
-  window.addEventListener("mouseup", onUp);
-  stage.addEventListener("dblclick", (e) => { e.preventDefault(); if (scale > 1) reset(); else { scale = 2; apply(); } });
+  // Mouse wheel/drag + touch pinch/pan zoom (shared with the clip viewer).
+  const zp = attachZoomPan(stage, img);
 
   // Manual recording: server is stateless (holds nothing); we keep started_at.
   let startedAt = null, recTimer = null, recBtn;
@@ -381,18 +456,17 @@ function openLiveMonitor(cam) {
 
   const toolbar = el("div", { class: "video-toolbar" },
     recBtn,
-    el("button", { class: "btn btn-sm", title: "Reset zoom", onclick: () => reset() }, "Reset zoom"),
-    el("button", { class: "btn btn-sm", title: "Fullscreen", onclick: () => { (stage.requestFullscreen ? stage : img).requestFullscreen?.(); } }, "⛶ Fullscreen"),
+    el("button", { class: "btn btn-sm", title: "Reset zoom", onclick: () => zp.reset() }, "Reset zoom"),
+    el("button", { class: "btn btn-sm", title: "Fullscreen", onclick: () => goFullscreen(stage) }, "⛶ Fullscreen"),
     el("button", { class: "btn btn-sm", title: "Live with sound (HLS)", onclick: () => { modal.close(); openLivePlayer(cam); } }, "🔊 Sound"),
   );
 
   const wrap = el("div", { class: "video-viewer" }, stage, toolbar,
-    el("div", { class: "vv-hint" }, "Low-latency monitor · scroll to zoom · drag to pan · double-click to toggle zoom"));
+    el("div", { class: "vv-hint" }, "Pinch / scroll to zoom · drag to pan · double-tap to toggle · ⛶ for fullscreen"));
 
   modal._onClose = () => {
     if (startedAt) stopRec(true);            // auto-save an in-progress recording
-    window.removeEventListener("mousemove", onMove);
-    window.removeEventListener("mouseup", onUp);
+    zp.destroy();
     try { img.src = ""; } catch (_) {}        // stop the MJPEG connection
   };
   modal.open(cam.name + " — monitor", wrap, { wide: true });
@@ -758,49 +832,9 @@ function buildVideoViewer(ev) {
 
   const stage = el("div", { class: "video-stage" }, video);
 
-  // Zoom + pan state, applied via CSS transform on the <video>.
-  let scale = 1, tx = 0, ty = 0, dragging = false, sx = 0, sy = 0;
-  const MIN = 1, MAX = 6;
-  const apply = () => {
-    video.style.transform = `translate(${tx}px, ${ty}px) scale(${scale})`;
-    stage.classList.toggle("zoomed", scale > 1);
-  };
-  const reset = () => { scale = 1; tx = 0; ty = 0; apply(); };
-
-  // Scroll to zoom toward the cursor.
-  stage.addEventListener("wheel", (e) => {
-    e.preventDefault();
-    const rect = stage.getBoundingClientRect();
-    const cx = e.clientX - rect.left - rect.width / 2;
-    const cy = e.clientY - rect.top - rect.height / 2;
-    const prev = scale;
-    scale = Math.min(MAX, Math.max(MIN, scale * (e.deltaY < 0 ? 1.15 : 1 / 1.15)));
-    // keep the point under the cursor stable
-    const k = scale / prev;
-    tx = cx - (cx - tx) * k;
-    ty = cy - (cy - ty) * k;
-    if (scale === 1) { tx = 0; ty = 0; }
-    apply();
-  }, { passive: false });
-
-  // Drag to pan while zoomed (doesn't interfere with the controls bar).
-  stage.addEventListener("mousedown", (e) => {
-    if (scale <= 1) return;
-    dragging = true; sx = e.clientX - tx; sy = e.clientY - ty;
-    stage.classList.add("panning");
-    e.preventDefault();
-  });
-  window.addEventListener("mousemove", (e) => {
-    if (!dragging) return;
-    tx = e.clientX - sx; ty = e.clientY - sy; apply();
-  });
-  window.addEventListener("mouseup", () => { dragging = false; stage.classList.remove("panning"); });
-  // Double-click toggles a 2x zoom / reset.
-  stage.addEventListener("dblclick", (e) => {
-    e.preventDefault();
-    if (scale > 1) { reset(); }
-    else { scale = 2; apply(); }
-  });
+  // Mouse wheel/drag + touch pinch/pan zoom (shared with the live monitor).
+  const zp = attachZoomPan(stage, video);
+  modal._onClose = () => zp.destroy();
 
   const speeds = [0.25, 0.5, 1, 1.5, 2];
   const speedBtns = speeds.map((r) =>
@@ -819,15 +853,15 @@ function buildVideoViewer(ev) {
     speedWrap,
     el("button", { class: "btn btn-sm", title: "Step back 1/25s", onclick: () => { video.pause(); video.currentTime = Math.max(0, video.currentTime - 0.04); } }, "⏴ frame"),
     el("button", { class: "btn btn-sm", title: "Step forward 1/25s", onclick: () => { video.pause(); video.currentTime += 0.04; } }, "frame ⏵"),
-    el("button", { class: "btn btn-sm", title: "Reset zoom", onclick: () => reset() }, "Reset zoom"),
-    el("button", { class: "btn btn-sm", title: "Fullscreen", onclick: () => { (stage.requestFullscreen ? stage : video).requestFullscreen?.(); } }, "⛶ Fullscreen"),
+    el("button", { class: "btn btn-sm", title: "Reset zoom", onclick: () => zp.reset() }, "Reset zoom"),
+    el("button", { class: "btn btn-sm", title: "Fullscreen", onclick: () => goFullscreen(stage) }, "⛶ Fullscreen"),
   );
 
   const p = video.play && video.play();
   if (p && p.catch) p.catch(() => {});
 
   return el("div", { class: "video-viewer" }, stage, toolbar,
-    el("div", { class: "vv-hint" }, "Scroll to zoom · drag to pan · double-click to toggle zoom"));
+    el("div", { class: "vv-hint" }, "Pinch / scroll to zoom · drag to pan · double-tap to toggle · ⛶ for fullscreen"));
 }
 
 async function openEventDetail(id) {

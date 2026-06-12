@@ -4,6 +4,25 @@ All notable changes to this project are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/), and this project
 adheres to [Semantic Versioning](https://semver.org/).
 
+## [1.8.0] — 2026-06-13
+
+### Added
+- **Touch gestures on mobile (VMS).** The live monitor and the recorded-clip
+  viewer now support **two-finger pinch-to-zoom**, **one-finger drag-to-pan**
+  (while zoomed) and **double-tap** to toggle 2× — alongside the existing mouse
+  wheel/drag/double-click on desktop. A single shared `attachZoomPan` handler
+  drives both, so the feel is identical everywhere. `touch-action` is tuned per
+  surface so the browser's own pinch-zoom never fights the gesture, while the
+  native `<video>` controls keep working in the clip viewer.
+- **Orientation-aware fullscreen.** Fullscreen now fills the screen and follows
+  the device: rotating the phone re-lays-out the media to fill in landscape and
+  letterboxes cleanly in portrait (no forced orientation lock, so the picture
+  rotates naturally with the handset). The zoom re-centers on `orientationchange`.
+
+### Changed
+- **Responsive viewer polish.** Larger touch targets on the toolbar/record
+  button under 820 px, and landscape phones give the media up to 82 vh.
+
 ## [1.7.2] — 2026-06-13
 
 ### Changed
