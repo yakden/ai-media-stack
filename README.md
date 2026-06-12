@@ -8,7 +8,7 @@ Floor-plan → 3D · live voice-to-voice translation in your own voice · video 
 talking avatars · on-box LLMs — all behind one **GPU job-broker** with automatic model-swapping,
 and one **API gateway** with keys, per-key metering, quotas and billing.
 
-![Version](https://img.shields.io/badge/release-v1.8.0-brightgreen)
+![Version](https://img.shields.io/badge/release-v1.9.0-brightgreen)
 ![License](https://img.shields.io/badge/license-MIT-blue)
 ![Python](https://img.shields.io/badge/python-3.10%2B-3776AB)
 ![FastAPI](https://img.shields.io/badge/FastAPI-009688)
@@ -98,7 +98,7 @@ flowchart TD
 | [`control-plane`](services/control-plane) | 8090 | Ops dashboard (services, GPU, system) |
 | [`floorplan3d`](services/floorplan3d) | 8204 | CPU wrapper: OCR + Mask-R-CNN + medial-axis wall vectorization |
 | [`cubicasa-service`](services/cubicasa-service) | 8205 | CPU wrapper: neural plan parsing (walls/rooms/doors/windows) + colour-based apartments |
-| [`vms`](services/vms) | 8120 | Video Management System: RTSP cameras, person-triggered recording, live grid, face recognition |
+| [`vms` ↗](https://github.com/yakden/iris) | 8120 | **Iris** — Video Management System with cross-camera, face-anchored re-identification. Now a [standalone repo](https://github.com/yakden/iris) (EN/RU/PL docs). |
 
 > Also integrated behind the gateway (third-party stacks, deployed not vendored): **IOPaint** (object
 > removal), **Wan/ComfyUI** (video generation), **Open WebUI** (chat), **Ollama** (model backend),

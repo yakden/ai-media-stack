@@ -4,6 +4,15 @@ All notable changes to this project are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/), and this project
 adheres to [Semantic Versioning](https://semver.org/).
 
+## [1.9.0] — 2026-06-13
+
+### Changed
+- **VMS extracted to its own repository.** The Video Management System is now developed and
+  documented as a standalone project — **[Iris](https://github.com/yakden/iris)** — with a polished,
+  trilingual (EN/RU/PL) docs set. Inside this monorepo, `services/vms/` is now a thin pointer to that
+  repository instead of a vendored copy (and the convenience root `vms` symlink was removed), so the
+  code has a single source of truth and is no longer duplicated.
+
 ## [1.8.0] — 2026-06-13
 
 ### Added
