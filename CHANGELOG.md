@@ -4,6 +4,25 @@ All notable changes to this project are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/), and this project
 adheres to [Semantic Versioning](https://semver.org/).
 
+## [1.5.1] — 2026-06-12
+
+### Security
+Second VMS hardening batch — credential exposure & SSRF (server-side only, no
+change to the auth/SSO flow):
+- **RTSP credentials are no longer returned by the API.** Every camera response
+  now masks the URL userinfo (`rtsp://***@host:port/path`); the raw URL with
+  credentials stays server-side (workers read it straight from the DB, so capture
+  is unaffected). Previously `GET /api/cameras` returned `admin:password` in clear
+  text to anyone who could reach the API (`app/api/cameras.py`).
+- **Camera edit can't leak or clobber the secret.** A blank or masked `rtsp_url`
+  on update is treated as "keep current", so the UI safely echoes the redacted
+  value without overwriting the stored credentials.
+- **SSRF / local-file-read hardening on ffmpeg.** Both the segmenter and the HLS
+  spawner now pass `-protocol_whitelist rtsp,rtsps,rtp,rtcp,udp,tcp,tls,crypto`,
+  and `rtsp_url` is validated to the `rtsp://`/`rtsps://` schemes — so an operator
+  can't point the recorder at `file:///…`, `http://169.254.169.254`, etc.
+- String length caps added to the camera `name`/`rtsp_url` fields.
+
 ## [1.5.0] — 2026-06-12
 
 ### Security

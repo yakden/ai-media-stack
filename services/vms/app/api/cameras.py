@@ -131,13 +131,30 @@ def _effective_status(camera: Camera, manager=None) -> str:
     return stored
 
 
+def _mask_rtsp(url: str | None) -> str | None:
+    """Redact embedded credentials so the URL never leaves the server in the
+    clear. 'rtsp://user:pass@host:554/s' -> 'rtsp://***@host:554/s'. The host is
+    kept (operators need to identify the camera); only the userinfo is hidden."""
+    if not url:
+        return url
+    try:
+        scheme, rest = url.split("://", 1)
+    except ValueError:
+        return url
+    if "@" in rest:
+        return f"{scheme}://***@{rest.split('@', 1)[1]}"
+    return url
+
+
 def _to_out(camera: Camera, manager=None) -> CameraOut:
     """Serialise an ORM Camera into its response schema with derived status."""
     data = CameraOut.model_validate(camera, from_attributes=True)
     # Override the persisted status with the live/freshness-checked value, and
     # surface the live last_seen when the worker has a fresher one than the row.
     _, live_seen = _live_status(manager, camera.id)
-    update = {"status": _effective_status(camera, manager)}
+    # Never expose RTSP credentials in API responses (the worker reads the raw
+    # URL straight from the DB, so masking here doesn't affect capture).
+    update = {"status": _effective_status(camera, manager), "rtsp_url": _mask_rtsp(camera.rtsp_url)}
     if live_seen is not None and (camera.last_seen is None or live_seen.replace(tzinfo=None) > (camera.last_seen if camera.last_seen.tzinfo is None else camera.last_seen.replace(tzinfo=None))):
         update["last_seen"] = live_seen
     return data.model_copy(update=update)
@@ -220,6 +237,14 @@ def update_camera(
     """
     camera = _get_or_404(db, camera_id)
     fields = payload.model_dump(exclude_unset=True)
+
+    # The API only ever returns a MASKED rtsp_url, so the UI may echo that
+    # redacted value back on an unrelated edit. Treat a blank or masked URL as
+    # "keep the current one" — only a real, new URL replaces the stored secret.
+    if "rtsp_url" in fields:
+        v = (fields["rtsp_url"] or "").strip()
+        if not v or "***" in v:
+            fields.pop("rtsp_url")
 
     was_enabled = camera.enabled
     old_rtsp = camera.rtsp_url

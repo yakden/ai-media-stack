@@ -127,6 +127,8 @@ class HlsManager:
         seg = str(out_dir / "seg%05d.ts")
         cmd = [
             self.ffmpeg_bin, "-hide_banner", "-loglevel", "warning", "-nostdin",
+            # Restrict demuxer protocols to the RTSP family (anti-SSRF / file read).
+            "-protocol_whitelist", "rtsp,rtsps,rtp,rtcp,udp,tcp,tls,crypto",
             "-rtsp_transport", self.rtsp_transport,
             "-fflags", "+genpts", "-use_wallclock_as_timestamps", "1",
             "-i", rtsp_url,

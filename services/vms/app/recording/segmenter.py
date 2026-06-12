@@ -265,6 +265,9 @@ class Segmenter:
             "-hide_banner",
             "-loglevel", "warning",
             "-nostdin",
+            # Restrict demuxer protocols to the RTSP family so a malicious URL
+            # can't make ffmpeg read local files / reach internal HTTP (SSRF).
+            "-protocol_whitelist", "rtsp,rtsps,rtp,rtcp,udp,tcp,tls,crypto",
             # Input: RTSP, force transport, modest probe so it starts quickly.
             "-rtsp_transport", self.rtsp_transport,
             "-fflags", "+genpts",

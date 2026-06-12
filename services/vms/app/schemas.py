@@ -34,9 +34,27 @@ def _normalize_trigger_classes(v):
     return ",".join(out) if out else None
 
 
+def _check_rtsp_scheme(v: str | None) -> str | None:
+    """Reject anything but rtsp:// / rtsps:// so a camera URL can't be turned into
+    an SSRF / local-file-read primitive (file://, http://169.254.169.254, ...).
+    A redacted URL echoed back by the UI ('rtsp://***@host') still passes here;
+    the camera update endpoint then treats it as 'keep current'."""
+    if v is None:
+        return v
+    scheme = str(v).split("://", 1)[0].lower()
+    if scheme not in ("rtsp", "rtsps"):
+        raise ValueError("rtsp_url must use the rtsp:// or rtsps:// scheme")
+    return v
+
+
 class CameraBase(BaseModel):
-    name: str = Field(..., min_length=1, description="Human-friendly camera name")
-    rtsp_url: str = Field(..., min_length=1, description="RTSP source URL")
+    name: str = Field(..., min_length=1, max_length=200, description="Human-friendly camera name")
+    rtsp_url: str = Field(..., min_length=1, max_length=2000, description="RTSP source URL")
+
+    @field_validator("rtsp_url")
+    @classmethod
+    def _validate_rtsp_url(cls, v: str) -> str:
+        return _check_rtsp_scheme(v)
     enabled: bool = True
     detect_conf: Optional[float] = Field(
         None, ge=0.0, le=1.0, description="Detection confidence threshold override"
@@ -97,9 +115,14 @@ class CameraCreate(CameraBase):
 class CameraUpdate(BaseModel):
     """Body for PUT /api/cameras/{id} — all fields optional (partial update)."""
 
-    name: Optional[str] = Field(None, min_length=1)
-    rtsp_url: Optional[str] = Field(None, min_length=1)
+    name: Optional[str] = Field(None, min_length=1, max_length=200)
+    rtsp_url: Optional[str] = Field(None, min_length=1, max_length=2000)
     enabled: Optional[bool] = None
+
+    @field_validator("rtsp_url")
+    @classmethod
+    def _validate_rtsp_url(cls, v: Optional[str]) -> Optional[str]:
+        return _check_rtsp_scheme(v)
     detect_conf: Optional[float] = Field(None, ge=0.0, le=1.0)
     pre_seconds: Optional[int] = Field(None, ge=0, le=120)
     post_seconds: Optional[int] = Field(None, ge=0, le=300)
