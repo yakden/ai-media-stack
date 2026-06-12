@@ -17,15 +17,18 @@ from __future__ import annotations
 
 import asyncio
 import time
+from datetime import datetime, timezone
+from types import SimpleNamespace
 
 from fastapi import APIRouter, Depends, HTTPException, Request
 from fastapi.responses import FileResponse, Response, StreamingResponse
+from starlette.concurrency import run_in_threadpool
 from sqlalchemy.orm import Session
 
 from ..auth import require_auth
 from ..config import get_settings
 from ..db.database import get_db
-from ..db.models import Camera
+from ..db.models import Camera, Event
 
 router = APIRouter(prefix="/api/live", tags=["live"])
 
@@ -197,23 +200,27 @@ def _part(frame: bytes) -> bytes:
 async def stream(
     camera_id: int,
     request: Request,
+    fps: float | None = None,
     db: Session = Depends(get_db),
     _auth=Depends(require_auth),
 ) -> StreamingResponse:
     """Stream annotated frames as ``multipart/x-mixed-replace`` MJPEG.
 
     Long-lived response; the browser renders each JPEG part in place. Frame rate
-    is capped by ``settings.live_mjpeg_fps`` to bound bandwidth/CPU. nginx must
-    run with ``proxy_buffering off`` for per-frame flushing.
+    is capped by ``settings.live_mjpeg_fps`` to bound bandwidth/CPU; an optional
+    ``?fps=`` lets the grid request a LOWER rate (many tiles at once) while a
+    focused/fullscreen viewer asks for the full rate. nginx must run with
+    ``proxy_buffering off`` for per-frame flushing.
     """
     _camera_or_404(db, camera_id)
     manager = _manager(request)
 
     settings = get_settings()
-    fps = float(getattr(settings, "live_mjpeg_fps", 10.0) or 10.0)
+    cap = float(getattr(settings, "live_mjpeg_fps", 10.0) or 10.0)
+    use_fps = cap if fps is None else max(1.0, min(cap, float(fps)))
 
     return StreamingResponse(
-        _mjpeg_generator(manager, camera_id, fps),
+        _mjpeg_generator(manager, camera_id, use_fps),
         media_type=f"multipart/x-mixed-replace; boundary={_BOUNDARY}",
         headers={
             "Cache-Control": "no-store, no-cache, must-revalidate, max-age=0",
@@ -222,6 +229,110 @@ async def stream(
             "X-Accel-Buffering": "no",  # belt-and-suspenders: disable nginx buffering
         },
     )
+
+
+# --------------------------------------------------------------------------- #
+# MANUAL recording — operator presses ● REC in Live Monitoring. Stateless: the
+# client holds the server-issued start time and sends it back on stop; the clip
+# is assembled from the warm on-disk segment buffer (no worker round-trip).
+# --------------------------------------------------------------------------- #
+
+_MANUAL_PRE = 1   # seconds of pre-roll to include before the pressed-start
+_MANUAL_POST = 1  # seconds of post-roll after stop
+
+
+@router.post("/{camera_id}/record/start")
+async def record_start(
+    camera_id: int,
+    request: Request,
+    db: Session = Depends(get_db),
+    _auth=Depends(require_auth),
+) -> dict:
+    """Begin a manual recording. Returns the server-trusted start timestamp the
+    client echoes back on stop (keeps the server stateless)."""
+    _camera_or_404(db, camera_id)
+    return {"camera_id": camera_id, "started_at": datetime.now(timezone.utc).isoformat()}
+
+
+@router.post("/{camera_id}/record/stop")
+async def record_stop(
+    camera_id: int,
+    payload: dict,
+    request: Request,
+    db: Session = Depends(get_db),
+    _auth=Depends(require_auth),
+) -> dict:
+    """Finish a manual recording: assemble a clip spanning [started_at, now] from
+    the rolling segment buffer and persist it as a ``manual`` event."""
+    _camera_or_404(db, camera_id)
+    settings = get_settings()
+
+    raw = str((payload or {}).get("started_at") or "")
+    try:
+        start_dt = datetime.fromisoformat(raw.replace("Z", "+00:00"))
+        if start_dt.tzinfo is None:
+            start_dt = start_dt.replace(tzinfo=timezone.utc)
+    except ValueError:
+        raise HTTPException(status_code=400, detail="invalid started_at")
+
+    end_dt = datetime.now(timezone.utc)
+    start_epoch = start_dt.timestamp()
+    end_epoch = end_dt.timestamp()
+    if end_epoch - start_epoch < 0.5:
+        start_epoch = end_epoch - 1.0  # ensure a minimum clip length
+    # Bound by the segment retention so we never ask for footage already pruned.
+    retention = float(getattr(settings, "segment_retention_seconds", 120))
+    if end_epoch - start_epoch > retention - 5:
+        start_epoch = end_epoch - (retention - 5)
+
+    # Persist the event up-front (naive-UTC ts, matching the worker convention).
+    ev = Event(
+        camera_id=camera_id,
+        ts=datetime.utcfromtimestamp(start_epoch),
+        label="manual",
+        num_objects=1,
+        object_classes="manual",
+    )
+    db.add(ev)
+    db.commit()
+    db.refresh(ev)
+    event_id = int(ev.id)
+
+    # Assemble the clip off the event loop (it waits briefly for post-roll).
+    from ..recording.clipper import build_clip_from_track
+
+    seg_shim = SimpleNamespace(
+        segments_dir=settings.segments_dir / str(camera_id),
+        segment_seconds=int(getattr(settings, "segment_seconds", 2)),
+        retention_seconds=retention,
+        pre_seconds=_MANUAL_PRE,
+        post_seconds=_MANUAL_POST,
+    )
+    built = await run_in_threadpool(
+        build_clip_from_track,
+        segmenter=seg_shim,
+        camera_id=camera_id,
+        event_id=event_id,
+        enter_ts=start_epoch,
+        last_ts=end_epoch,
+        data_dir=settings.data_dir,
+        pre_seconds=_MANUAL_PRE,
+        post_seconds=_MANUAL_POST,
+    )
+
+    ev = db.get(Event, event_id)
+    if ev is not None:
+        if getattr(built, "clip_path", None):
+            ev.clip_path = built.clip_path
+        if getattr(built, "thumb_path", None):
+            ev.thumb_path = built.thumb_path
+        db.commit()
+
+    return {
+        "event_id": event_id,
+        "clip": bool(getattr(built, "clip_path", None)),
+        "duration": round(end_epoch - start_epoch, 1),
+    }
 
 
 # --------------------------------------------------------------------------- #

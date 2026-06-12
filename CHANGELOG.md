@@ -4,6 +4,24 @@ All notable changes to this project are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/), and this project
 adheres to [Semantic Versioning](https://semver.org/).
 
+## [1.7.0] — 2026-06-13
+
+### Added
+- **Live Monitoring upgrades (VMS).** Clicking a camera now opens a low-latency
+  **monitor** (MJPEG, not the ~6–12 s HLS) with:
+  - **Fullscreen** (⛶) and **zoom/pan** — scroll to zoom toward the cursor, drag
+    to pan, double-click to toggle 2× (the same model as the clip viewer).
+  - A **manual record button** (● Record / ■ Stop with a live timer). Start/stop
+    is stateless on the server; the clip is assembled from the warm on-disk
+    segment buffer and saved as a `manual` event with clip + thumbnail
+    (`POST /api/live/{id}/record/start` · `/stop`).
+  - **Sound** stays available on demand (🔊 switches to the HLS player).
+
+### Performance
+- **Smoother live grid.** Grid tiles now stream at a low frame rate
+  (`/api/live/{id}/stream?fps=4`) so many cameras stay fluid at once, while the
+  focused monitor streams at the full rate — the main fix for grid stutter.
+
 ## [1.6.0] — 2026-06-12
 
 ### Security

@@ -204,8 +204,10 @@ async function renderLive() {
     const frame = el("div", { class: "frame" });
     if (online) {
       const ts = Date.now();
+      // Grid tiles stream at a LOW fps (many at once) to stay smooth; the
+      // focused monitor opens at full rate. This is the main anti-lag win.
       const img = el("img", {
-        src: `/api/live/${cam.id}/stream?t=${ts}`,
+        src: `/api/live/${cam.id}/stream?fps=4&t=${ts}`,
         alt: cam.name,
         onerror: function () {
           // fall back to snapshot polling if stream errors
@@ -226,8 +228,8 @@ async function renderLive() {
       )
     );
     if (online) {
-      frame.title = "Click for live with sound";
-      cell.addEventListener("click", () => openLivePlayer(cam));
+      frame.title = "Click to monitor (fullscreen · zoom · record)";
+      cell.addEventListener("click", () => openLiveMonitor(cam));
     }
     grid.append(cell);
   }
@@ -295,6 +297,105 @@ function openLivePlayer(cam) {
 
   modal.open(cam.name + " — live", wrap, { wide: true });
   startHls();
+}
+
+/* Focused LIVE MONITOR — low-latency MJPEG (not HLS) with zoom/pan, fullscreen,
+ * and a manual record button. This is the default tile action; sound (HLS) is a
+ * secondary toggle since it is ~6–12 s behind and heavier. */
+function openLiveMonitor(cam) {
+  const id = cam.id;
+  const img = el("img", {
+    class: "event-video live-monitor-img",
+    src: `/api/live/${id}/stream?t=${Date.now()}`,   // full fps for the focused view
+    alt: cam.name,
+    onerror: function () { this.onerror = null; this.src = `/api/live/${id}/snapshot?t=${Date.now()}`; },
+  });
+  const stage = el("div", { class: "video-stage" }, img);
+
+  // Zoom + pan (same model as the clip viewer), applied to the <img>.
+  let scale = 1, tx = 0, ty = 0, dragging = false, sx = 0, sy = 0;
+  const MIN = 1, MAX = 6;
+  const apply = () => {
+    img.style.transform = `translate(${tx}px, ${ty}px) scale(${scale})`;
+    stage.classList.toggle("zoomed", scale > 1);
+  };
+  const reset = () => { scale = 1; tx = 0; ty = 0; apply(); };
+  stage.addEventListener("wheel", (e) => {
+    e.preventDefault();
+    const rect = stage.getBoundingClientRect();
+    const cx = e.clientX - rect.left - rect.width / 2;
+    const cy = e.clientY - rect.top - rect.height / 2;
+    const prev = scale;
+    scale = Math.min(MAX, Math.max(MIN, scale * (e.deltaY < 0 ? 1.15 : 1 / 1.15)));
+    const k = scale / prev;
+    tx = cx - (cx - tx) * k; ty = cy - (cy - ty) * k;
+    if (scale === 1) { tx = 0; ty = 0; }
+    apply();
+  }, { passive: false });
+  stage.addEventListener("mousedown", (e) => {
+    if (scale <= 1) return;
+    dragging = true; sx = e.clientX - tx; sy = e.clientY - ty;
+    stage.classList.add("panning"); e.preventDefault();
+  });
+  const onMove = (e) => { if (dragging) { tx = e.clientX - sx; ty = e.clientY - sy; apply(); } };
+  const onUp = () => { dragging = false; stage.classList.remove("panning"); };
+  window.addEventListener("mousemove", onMove);
+  window.addEventListener("mouseup", onUp);
+  stage.addEventListener("dblclick", (e) => { e.preventDefault(); if (scale > 1) reset(); else { scale = 2; apply(); } });
+
+  // Manual recording: server is stateless (holds nothing); we keep started_at.
+  let startedAt = null, recTimer = null, recBtn;
+  const fmt = (s) => `${Math.floor(s / 60)}:${String(s % 60).padStart(2, "0")}`;
+  async function startRec() {
+    recBtn.disabled = true;
+    try {
+      const r = await fetch(`/api/live/${id}/record/start`, { method: "POST" });
+      if (!r.ok) throw new Error("HTTP " + r.status);
+      startedAt = (await r.json()).started_at;
+      const t0 = Date.now();
+      recBtn.classList.add("recording");
+      recBtn.innerHTML = "■ Stop · 0:00";
+      recTimer = setInterval(() => {
+        recBtn.innerHTML = "■ Stop · " + fmt(Math.floor((Date.now() - t0) / 1000));
+      }, 1000);
+    } catch (e) { toast("Could not start recording: " + e.message, "error"); }
+    finally { recBtn.disabled = false; }
+  }
+  async function stopRec(silent) {
+    if (recTimer) { clearInterval(recTimer); recTimer = null; }
+    const sa = startedAt; startedAt = null;
+    recBtn.classList.remove("recording");
+    recBtn.innerHTML = "● Record";
+    if (!sa) return;
+    try {
+      const r = await fetch(`/api/live/${id}/record/stop`, {
+        method: "POST", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ started_at: sa }),
+      });
+      if (!r.ok) throw new Error("HTTP " + r.status);
+      const j = await r.json();
+      if (!silent) toast(j.clip ? `Saved manual clip (${j.duration}s) → Events` : "Saved (clip pending)", "ok");
+    } catch (e) { if (!silent) toast("Could not save recording: " + e.message, "error"); }
+  }
+  recBtn = el("button", { class: "btn btn-sm btn-rec", title: "Manual record", onclick: () => (startedAt ? stopRec(false) : startRec()) }, "● Record");
+
+  const toolbar = el("div", { class: "video-toolbar" },
+    recBtn,
+    el("button", { class: "btn btn-sm", title: "Reset zoom", onclick: () => reset() }, "Reset zoom"),
+    el("button", { class: "btn btn-sm", title: "Fullscreen", onclick: () => { (stage.requestFullscreen ? stage : img).requestFullscreen?.(); } }, "⛶ Fullscreen"),
+    el("button", { class: "btn btn-sm", title: "Live with sound (HLS)", onclick: () => { modal.close(); openLivePlayer(cam); } }, "🔊 Sound"),
+  );
+
+  const wrap = el("div", { class: "video-viewer" }, stage, toolbar,
+    el("div", { class: "vv-hint" }, "Low-latency monitor · scroll to zoom · drag to pan · double-click to toggle zoom"));
+
+  modal._onClose = () => {
+    if (startedAt) stopRec(true);            // auto-save an in-progress recording
+    window.removeEventListener("mousemove", onMove);
+    window.removeEventListener("mouseup", onUp);
+    try { img.src = ""; } catch (_) {}        // stop the MJPEG connection
+  };
+  modal.open(cam.name + " — monitor", wrap, { wide: true });
 }
 
 function statusBadge(status) {
