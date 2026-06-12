@@ -32,6 +32,7 @@ from __future__ import annotations
 
 import logging
 import os
+import shutil
 from typing import List, Optional
 
 from fastapi import APIRouter, Body, Depends, HTTPException, Query, Request, status
@@ -948,14 +949,47 @@ def split_identity(
     return res
 
 
+def _safe_remove(path: Optional[str]) -> None:
+    if not path:
+        return
+    try:
+        os.remove(path)
+    except OSError:
+        pass
+
+
+def _purge_identity_files(settings: Settings, db: Session, identity_id: int) -> None:
+    """Remove on-disk artifacts OWNED by an identity so a delete leaves nothing
+    behind: (1) the face-sample crops linked to it + their rows (FaceSample has
+    no DB-level FK cascade), and (2) the whole per-identity crop directory where
+    every sighting body-thumbnail lives (``data/identities/<id>/``)."""
+    m = _models()
+    fs_model = getattr(m, "FaceSample", None)
+    if fs_model is not None:
+        try:
+            for s in db.query(fs_model).filter(fs_model.identity_id == identity_id).all():
+                if getattr(s, "thumb_path", None):
+                    _safe_remove(_resolve_data_path(settings, s.thumb_path))
+                db.delete(s)
+        except Exception:
+            logger.exception("face-sample purge failed for identity %s", identity_id)
+    try:
+        d = os.path.join(os.path.abspath(str(settings.data_dir)), "identities", str(identity_id))
+        if os.path.isdir(d):
+            shutil.rmtree(d, ignore_errors=True)
+    except Exception:
+        logger.exception("identity crop-dir purge failed for identity %s", identity_id)
+
+
 @router.delete("/{identity_id}", status_code=status.HTTP_204_NO_CONTENT)
 def delete_identity(
     identity_id: int,
     request: Request,
     db: Session = Depends(get_db),
 ) -> Response:
-    """Delete an identity: cascades sightings + exemplars, detaches it from any
-    Events (the denormalized identity link is nulled), and reloads the gallery.
+    """Delete an identity recursively: cascades sightings + exemplars + presence
+    in the DB, purges its on-disk crops (sighting thumbnails + face samples),
+    detaches it from any Events (denormalized link nulled), reloads the gallery.
     """
     m = _models()
     identity = _get_identity_or_404(db, identity_id)
@@ -970,7 +1004,8 @@ def delete_identity(
             update(Event).where(Event.identity_id == identity_id).values(**values)
         )
 
-    db.delete(identity)  # cascades sightings + face/appearance exemplars
+    _purge_identity_files(get_settings(), db, identity_id)
+    db.delete(identity)  # cascades sightings + face/appearance exemplars + presence
     db.commit()
 
     _reload_gallery(request)
@@ -997,8 +1032,10 @@ def bulk_delete_identities(
         return {"deleted": 0}
     ids = [int(i) for i in ids]
     _detach_identity_events(db, ids)
+    settings = get_settings()
     n = 0
     for ident in db.query(m.Identity).filter(m.Identity.id.in_(ids)).all():
+        _purge_identity_files(settings, db, int(ident.id))
         db.delete(ident)
         n += 1
     db.commit()
@@ -1020,6 +1057,7 @@ def clear_all_identities(
     q = db.query(m.Identity)
     if object_class:
         q = q.filter(m.Identity.object_class == object_class)
+    settings = get_settings()
     n = 0
     while True:
         batch = q.limit(200).all()
@@ -1027,6 +1065,7 @@ def clear_all_identities(
             break
         _detach_identity_events(db, [int(i.id) for i in batch])
         for ident in batch:
+            _purge_identity_files(settings, db, int(ident.id))
             db.delete(ident)
             n += 1
         db.commit()

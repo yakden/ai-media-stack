@@ -4,6 +4,24 @@ All notable changes to this project are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/), and this project
 adheres to [Semantic Versioning](https://semver.org/).
 
+## [1.7.1] — 2026-06-13
+
+### Fixed
+- **Recursive identity deletion now also purges files.** Deleting an identity
+  (single / bulk / clear-all) already cascaded its DB rows (sightings,
+  face/appearance exemplars, presence segments); it now *also* removes the
+  on-disk artifacts that were previously orphaned: the per-identity sighting-crop
+  directory (`data/identities/<id>/`) and every linked face-sample crop +
+  row (`FaceSample` has no DB-level FK cascade, so it is purged explicitly).
+  Event clips are intentionally preserved (shared footage) — only the
+  denormalized identity link is nulled.
+- **One-time cleanup** of the backlog left by pre-fix deletes: 308 orphaned
+  face-sample rows + crops and 216 orphaned identity crop directories removed, so
+  on-disk state matches the live identities exactly.
+
+> Events and people already cleaned up their own files (clips/thumbnails and
+> enrollment photos); this closes the remaining gap so every delete is recursive.
+
 ## [1.7.0] — 2026-06-13
 
 ### Added
