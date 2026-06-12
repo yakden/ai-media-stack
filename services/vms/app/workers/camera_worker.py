@@ -130,6 +130,14 @@ class CameraWorker:
         self._last_activity_ts = 0.0   # last time a trigger object was seen
         self._last_frame_write = 0.0   # last time the live preview slot was written
         self._last_boxes: list = []    # boxes to re-draw on frames we didn't detect
+        # Decode thread (drop-to-latest): the grabber owns the capture and keeps
+        # only the newest frame; the main loop consumes it, so under load we drop
+        # stale frames instead of falling behind real time.
+        self._decode_thread = None
+        self._frame_cond = threading.Condition()
+        self._latest_frame = None
+        self._latest_ts = 0.0
+        self._frame_seq = 0
 
         # Lazily-built components (constructed inside run() so import/CUDA cost
         # is paid in the child process).
@@ -450,6 +458,12 @@ class CameraWorker:
             self._heartbeat(STATE_STOPPED)
 
     def _teardown(self) -> None:
+        # Stop the decode producer first (it owns the capture); it exits on the
+        # next loop check now that _running is False. Daemon, so bounded join.
+        if self._decode_thread is not None and self._decode_thread.is_alive():
+            with self._frame_cond:
+                self._frame_cond.notify_all()
+            self._decode_thread.join(timeout=8.0)
         # Close any still-open tracks so their dwell time + clips aren't lost.
         if self._tracker is not None:
             try:
@@ -522,11 +536,12 @@ class CameraWorker:
             pass
         return cap
 
-    def _loop(self) -> None:
-        import cv2
-
+    def _decode_loop(self) -> None:
+        """Producer thread: own the RTSP capture, read frames as fast as the
+        stream delivers them, and publish ONLY the newest one (drop-old) plus the
+        reconnect handling. The consumer (``_loop``) processes the latest frame,
+        so a slow analysis pass drops stale frames instead of building latency."""
         cap = None
-        last_detect = 0.0
         while self._running:
             if cap is None or not cap.isOpened():
                 if cap is not None:
@@ -548,6 +563,45 @@ class CameraWorker:
                 cap = None
                 self._heartbeat(STATE_OFFLINE, error="stream interrupted")
                 self._sleep(self.reconnect_delay)
+                continue
+
+            # Publish as the latest frame (overwrite any unconsumed one => drop).
+            with self._frame_cond:
+                self._latest_frame = frame
+                self._latest_ts = now
+                self._frame_seq += 1
+                self._frame_cond.notify()
+
+        if cap is not None:
+            cap.release()
+        # Wake the consumer so it can observe _running == False promptly.
+        with self._frame_cond:
+            self._frame_cond.notify_all()
+
+    def _loop(self) -> None:
+        # Start the drop-to-latest decode producer; this loop is the consumer.
+        self._decode_thread = threading.Thread(
+            target=self._decode_loop, name=f"decode-cam{self.camera_id}", daemon=True,
+        )
+        self._decode_thread.start()
+
+        last_seq = 0
+        last_detect = 0.0
+        while self._running:
+            # Block until a frame newer than the one we last processed arrives.
+            with self._frame_cond:
+                self._frame_cond.wait_for(
+                    lambda: self._frame_seq != last_seq or not self._running,
+                    timeout=1.0,
+                )
+                if not self._running:
+                    break
+                if self._frame_seq == last_seq:
+                    continue  # timed out with no new frame
+                frame = self._latest_frame
+                now = self._latest_ts
+                last_seq = self._frame_seq
+            if frame is None:
                 continue
 
             self._tick_fps()
@@ -583,9 +637,6 @@ class CameraWorker:
             # Adaptive preview: re-encode the live slot at active/idle fps instead
             # of every decoded frame (JPEG-encoding an empty scene was pure waste).
             self._maybe_write_frame_slot(frame, active, now)
-
-        if cap is not None:
-            cap.release()
 
     def _sleep(self, seconds: float) -> None:
         # Interruptible sleep that respects stop requests.

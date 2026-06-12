@@ -4,6 +4,20 @@ All notable changes to this project are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/), and this project
 adheres to [Semantic Versioning](https://semver.org/).
 
+## [1.4.2] — 2026-06-12
+
+### Performance
+- **Drop-to-latest decode thread (VMS).** Each camera worker now reads its RTSP
+  stream on a dedicated producer thread that publishes only the *newest* frame;
+  the detection loop consumes that latest frame instead of calling `cap.read()`
+  inline. Under load — or when an analysis pass is slow — stale frames are dropped
+  rather than queued, so the pipeline stays at real time instead of building
+  latency (the correct behaviour for surveillance). A stuck or reconnecting stream
+  no longer blocks the loop: the consumer waits with a timeout and stays
+  responsive while the producer handles reconnects. Verified on the live box —
+  `last_seen` advances in real time on a healthy camera while a flaky second
+  stream reconnects independently; teardown stays clean (bounded thread join).
+
 ## [1.4.1] — 2026-06-12
 
 ### Performance
