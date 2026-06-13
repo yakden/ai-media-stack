@@ -98,7 +98,7 @@ flowchart TD
 | [`control-plane`](services/control-plane) | 8090 | Ops dashboard (services, GPU, system) |
 | [`floorplan3d`](services/floorplan3d) | 8204 | CPU wrapper: OCR + Mask-R-CNN + medial-axis wall vectorization |
 | [`cubicasa-service`](services/cubicasa-service) | 8205 | CPU wrapper: neural plan parsing (walls/rooms/doors/windows) + colour-based apartments |
-| [`vms` ↗](https://github.com/yakden/iris) | 8120 | **Iris** — Video Management System with cross-camera, face-anchored re-identification. Now a [standalone repo](https://github.com/yakden/iris) (EN/RU/PL docs). |
+| `vms` | 8120 | **Iris** — Video Management System with cross-camera, face-anchored re-identification. Now a **separate, private commercial product** (public edition planned). |
 
 > Also integrated behind the gateway (third-party stacks, deployed not vendored): **IOPaint** (object
 > removal), **Wan/ComfyUI** (video generation), **Open WebUI** (chat), **Ollama** (model backend),
